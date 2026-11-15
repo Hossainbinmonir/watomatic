@@ -7,4 +7,15 @@
     <!-- Option Selection Colors -->
     <color name="selected_option_background">#2C2C2C</color>
     <color name="unselected_option_background">#1E1E1E</color>
+
+    <!-- Multi-Rule Auto Responder Dark Colors -->
+    <color name="rule_card_stroke">#2E3440</color>
+    <color name="rule_card_bg">#1B1F27</color>
+    <color name="rule_reply_box_bg">#222834</color>
+    <color name="rule_stat_total_bg">#1D2B44</color>
+    <color name="rule_stat_active_bg">#163322</color>
+    <color name="rule_stat_inactive_bg">#252830</color>
+    <color name="rule_active_accent">#4ADE80</color>
+    <color name="rule_inactive_accent">#9CA3AF</color>
+    <color name="rule_danger">#EF5350</color>
 </resources>

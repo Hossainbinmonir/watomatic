@@ -454,4 +454,141 @@
     <string name="quota_exhausted_message">Your quota has been completed. Please upgrade to a higher plan to continue using the service.</string>
     <string name="quota_exhausted_message_highest_plan">Your quota has been completed. It will renew on %1$s.</string>
     <string name="upgrade_now">Upgrade</string>
+
+    <!-- Bottom Navigation -->
+    <string name="nav_home">Atomatic</string>
+    <string name="nav_rules">Rules</string>
+    <string name="nav_community">Community</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Multi-Rule Auto Responder Dashboard -->
+    <string name="multi_rule_title">Auto-Reply Rules</string>
+    <string name="multi_rule_card_title">Multi-Rule Auto Responder</string>
+    <string name="multi_rule_card_summary_empty">Create keyword, schedule, and app-specific rules</string>
+    <string name="multi_rule_card_summary">%1$d active of %2$d rules</string>
+    <string name="manage_rules">Manage Rules</string>
+    <string name="total_rules_label">Total</string>
+    <string name="active_rules_label">Active</string>
+    <string name="inactive_rules_label">Inactive</string>
+    <string name="filter_all">All</string>
+    <string name="filter_active">Active</string>
+    <string name="filter_inactive">Inactive</string>
+    <string name="search_rules_hint">Search rules, keywords, or reply text</string>
+    <string name="add_rule">New Rule</string>
+    <string name="create_rule_title">Create Rule</string>
+    <string name="edit_rule_title">Edit Rule</string>
+    <string name="empty_rules_title">No Auto-Reply Rules Yet</string>
+    <string name="empty_rules_subtitle">Create independent rules with custom keywords, app filters, schedules, and priority order.</string>
+    <string name="empty_filtered_rules">No rules match your current filter.</string>
+    <string name="create_first_rule">Create First Rule</string>
+    <string name="rule_status_active">Active</string>
+    <string name="rule_status_inactive">Paused</string>
+    <string name="rule_priority_badge">Priority %1$d</string>
+    <string name="rule_duplicate">Duplicate</string>
+    <string name="rule_delete">Delete</string>
+    <string name="rule_edit">Edit</string>
+    <string name="rule_priority_up">Increase priority</string>
+    <string name="rule_priority_down">Decrease priority</string>
+    <string name="delete_rule_title">Delete Rule?</string>
+    <string name="delete_rule_message">Are you sure you want to delete \"%1$s\"? This action cannot be undone.</string>
+    <string name="rule_deleted_toast">Rule deleted</string>
+    <string name="rule_duplicated_toast">Rule duplicated</string>
+    <string name="rule_saved_toast">Rule saved</string>
+    <string name="rule_fallback_toggle_title">Fallback to Global Reply</string>
+    <string name="rule_fallback_toggle_desc">Send default/AI reply when no enabled rule matches</string>
+    <string name="rule_listener_warning">Notification Access is disabled. Enable Auto Reply on the home screen for rules to respond automatically.</string>
+
+    <!-- Create / Edit Rule Sections -->
+    <string name="section_basic_info">Basic Information</string>
+    <string name="rule_name_label">Rule Name</string>
+    <string name="rule_name_hint">e.g. Support Hours, Price Inquiry</string>
+    <string name="rule_enable_label">Enable Rule</string>
+    <string name="rule_enable_desc">Turn this automation rule on or off</string>
+
+    <string name="section_select_apps">Select Applications</string>
+    <string name="section_select_apps_desc">Choose which messaging apps trigger this rule</string>
+    <string name="select_all_apps">Select All</string>
+    <string name="clear_all_apps">Clear</string>
+    <string name="app_installed">Installed</string>
+    <string name="app_not_installed">Not installed</string>
+
+    <string name="section_message_conditions">Message Conditions</string>
+    <string name="match_condition_label">Matching Condition</string>
+    <string name="case_sensitive_label">Case Sensitive</string>
+    <string name="case_sensitive_desc">Distinguish between uppercase and lowercase letters</string>
+
+    <string name="match_exact">Exact Match</string>
+    <string name="match_contains">Contains</string>
+    <string name="match_starts_with">Starts With</string>
+    <string name="match_ends_with">Ends With</string>
+    <string name="match_does_not_contain">Does Not Contain</string>
+    <string name="match_any_keyword">Any Keyword</string>
+    <string name="match_all_keywords">All Keywords</string>
+    <string name="match_regex">Regular Expression</string>
+
+    <string name="match_desc_exact">Message equals one of the keywords exactly.</string>
+    <string name="match_desc_contains">Message contains any of the keywords anywhere.</string>
+    <string name="match_desc_starts_with">Message begins with any of the keywords.</string>
+    <string name="match_desc_ends_with">Message ends with any of the keywords.</string>
+    <string name="match_desc_does_not_contain">Message does not contain any of the keywords.</string>
+    <string name="match_desc_any_keyword">Message contains at least one whole keyword.</string>
+    <string name="match_desc_all_keywords">Message contains all listed keywords.</string>
+    <string name="match_desc_regex">Message matches any regular expression pattern.</string>
+
+    <string name="section_keywords">Keywords</string>
+    <string name="keywords_input_hint">Enter keyword or comma-separated list</string>
+    <string name="keywords_add_btn">Add</string>
+    <string name="keywords_helper">Separate multiple keywords with commas or tap Add after each keyword.</string>
+    <string name="regex_invalid_error">Invalid regular expression syntax</string>
+
+    <string name="section_reply_message">Automatic Reply Message</string>
+    <string name="reply_message_hint">Enter the custom reply to send when this rule matches</string>
+
+    <string name="section_advanced_settings">Advanced Settings</string>
+    <string name="priority_label">Rule Priority (0 – 100)</string>
+    <string name="priority_helper">Higher priority rules are evaluated before lower priority rules.</string>
+    <string name="reply_delay_label">Reply Delay (seconds)</string>
+    <string name="cooldown_seconds_label">Cooldown (seconds)</string>
+    <string name="frequency_limit_label">Max Replies per Sender (0 = unlimited)</string>
+    <string name="frequency_window_label">Frequency Window</string>
+    <string name="window_hourly">Per Hour</string>
+    <string name="window_daily">Per Day (24h)</string>
+    <string name="window_all_time">All Time</string>
+
+    <string name="section_contact_group_filters">Contact and Group Filters</string>
+    <string name="group_filter_label">Conversation Type</string>
+    <string name="group_filter_both">All Messages</string>
+    <string name="group_filter_direct">Direct Only</string>
+    <string name="group_filter_group">Groups Only</string>
+    <string name="contact_filter_label">Contact Filter</string>
+    <string name="contact_filter_all">All Contacts</string>
+    <string name="contact_filter_include">Only Selected</string>
+    <string name="contact_filter_exclude">Exclude Selected</string>
+    <string name="contact_name_hint">Add contact or sender name</string>
+    <string name="pick_from_contacts">Pick from Device Contacts</string>
+    <string name="no_contacts_found">No device contacts found</string>
+    <string name="contacts_permission_needed">Contacts permission is needed to browse device contacts. You can still type names manually.</string>
+
+    <string name="section_schedule">Schedule</string>
+    <string name="schedule_enable_label">Enable Active Schedule</string>
+    <string name="schedule_enable_desc">Only reply during selected days and time window</string>
+    <string name="start_time_label">Start Time</string>
+    <string name="end_time_label">End Time</string>
+    <string name="active_days_label">Active Days</string>
+    <string name="day_mon">Mon</string>
+    <string name="day_tue">Tue</string>
+    <string name="day_wed">Wed</string>
+    <string name="day_thu">Thu</string>
+    <string name="day_fri">Fri</string>
+    <string name="day_sat">Sat</string>
+    <string name="day_sun">Sun</string>
+
+    <string name="save_rule">Save Rule</string>
+
+    <!-- Validation Errors -->
+    <string name="error_rule_name_required">Please enter a rule name</string>
+    <string name="error_select_one_app">Select at least one application</string>
+    <string name="error_keyword_required">Add at least one keyword or pattern</string>
+    <string name="error_reply_message_required">Please enter an automatic reply message</string>
+    <string name="error_select_one_day">Select at least one active day when schedule is enabled</string>
 </resources>

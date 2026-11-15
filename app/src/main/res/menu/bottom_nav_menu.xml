@@ -3,13 +3,17 @@
     <item
         android:id="@+id/navigation_atomatic"
         android:icon="@drawable/ic_chat_circle_dots_filled"
-        android:title="Atomatic" />
+        android:title="@string/nav_home" />
+    <item
+        android:id="@+id/navigation_rules"
+        android:icon="@drawable/ic_rules"
+        android:title="@string/nav_rules" />
     <item
         android:id="@+id/navigation_community"
         android:icon="@drawable/ic_users"
-        android:title="Community" />
+        android:title="@string/nav_community" />
     <item
         android:id="@+id/navigation_settings"
         android:icon="@drawable/ic_gear"
-        android:title="Settings" />
+        android:title="@string/nav_settings" />
 </menu>

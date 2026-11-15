@@ -35,4 +35,15 @@
 
     <!-- Card Colors -->
     <color name="card_stroke_default">#5B5B5B</color>
+
+    <!-- Multi-Rule Auto Responder Colors -->
+    <color name="rule_card_stroke">#E0E4EA</color>
+    <color name="rule_card_bg">#FFFFFF</color>
+    <color name="rule_reply_box_bg">#F2F6FC</color>
+    <color name="rule_stat_total_bg">#EDF2FF</color>
+    <color name="rule_stat_active_bg">#E8F5E9</color>
+    <color name="rule_stat_inactive_bg">#F3F4F6</color>
+    <color name="rule_active_accent">#1B873F</color>
+    <color name="rule_inactive_accent">#6B7280</color>
+    <color name="rule_danger">#D32F2F</color>
 </resources>

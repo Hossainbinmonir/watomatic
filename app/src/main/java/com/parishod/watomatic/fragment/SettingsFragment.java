@@ -12,7 +12,6 @@ import androidx.preference.PreferenceFragmentCompat;
 import androidx.preference.SwitchPreference;
 
 import com.google.android.material.bottomsheet.BottomSheetDialog;
-import com.parishod.watomatic.BuildConfig;
 import com.parishod.watomatic.R;
 import com.parishod.watomatic.activity.main.MainActivity;
 import com.parishod.watomatic.model.preferences.PreferencesManager;
@@ -68,7 +67,7 @@ public class SettingsFragment extends PreferenceFragmentCompat {
 
         // Account/Login preference
         Preference accountPref = findPreference(getString(R.string.pref_account));
-        if(BuildConfig.FLAVOR.equals("Default")){
+        if (accountPref != null) {
             accountPref.setVisible(false);
         }
         if (accountPref != null) {

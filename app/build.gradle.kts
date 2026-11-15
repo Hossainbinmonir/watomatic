@@ -40,8 +40,18 @@ android {
         }
     }
 
+    signingConfigs {
+        create("debugConfig") {
+            storeFile = file("${rootDir}/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         getByName("debug") {
+            signingConfig = signingConfigs.getByName("debugConfig")
             enableUnitTestCoverage = true
         }
         getByName("release") {
@@ -71,16 +81,6 @@ android {
         dataBinding = true
         buildConfig = true
     }
-    flavorDimensions += "version"
-    productFlavors {
-        create("GooglePlay") {
-            dimension = "version"
-            applicationId = "com.parishod.atomatic"
-        }
-        create("Default") {
-            dimension = "version"
-        }
-    }
 }
 
 dependencies {
@@ -89,6 +89,7 @@ dependencies {
     implementation(libs.material)
     implementation(libs.constraintlayout)
     implementation(libs.room.runtime)
+    implementation(libs.room.ktx)
     implementation(libs.work.runtime)
     implementation(libs.activity)
     implementation(libs.work.testing)
@@ -109,38 +110,13 @@ dependencies {
     implementation(libs.sequence.layout)
     implementation(libs.browser)
     implementation(libs.security.crypto)
-
-    // Firebase and Google Sign-In
-    // Add flavor-specific deps dynamically
-    android.applicationVariants.all {
-        val flavorName = this.flavorName
-        if (flavorName.contains("GooglePlay", ignoreCase = true)) {
-            add("implementation", platform(libs.firebase.bom))
-            add("implementation", libs.firebase.auth)
-            add("implementation", libs.firebase.firestore)
-            add("implementation", libs.firebase.functions)
-            add("implementation", libs.play.services.auth)
-            add("implementation", libs.billing)
-            add("implementation", libs.credentials)
-            add("implementation", libs.credentials.play.services.auth)
-            add("implementation", libs.googleid)
-        }
-    }
-}
-
-// Apply Google Services plugin only if building GooglePlay variant
-gradle.startParameter.taskNames.any { task ->
-    if (task.contains("GooglePlay", ignoreCase = true)) {
-        apply(plugin = "com.google.gms.google-services")
-        true
-    } else {
-        false
-    }
+    implementation(libs.billing)
+    implementation(libs.play.services.auth)
 }
 
 // JaCoCo coverage verification – enforces minimum thresholds
 tasks.register<JacocoCoverageVerification>("jacocoCoverageVerification") {
-    dependsOn("testDefaultDebugUnitTest")
+    dependsOn("testDebugUnitTest")
     group = "Verification"
     description = "Enforces minimum JaCoCo coverage thresholds for model/utility classes."
 
@@ -159,10 +135,10 @@ tasks.register<JacocoCoverageVerification>("jacocoCoverageVerification") {
         "**/viewmodel/**"
     )
 
-    val javaClasses = fileTree("${layout.buildDirectory.get()}/intermediates/javac/DefaultDebug/compileDefaultDebugJavaWithJavac/classes") {
+    val javaClasses = fileTree("${layout.buildDirectory.get()}/intermediates/javac/debug/compileDebugJavaWithJavac/classes") {
         exclude(excludes)
     }
-    val kotlinClasses = fileTree("${layout.buildDirectory.get()}/tmp/kotlin-classes/DefaultDebug") {
+    val kotlinClasses = fileTree("${layout.buildDirectory.get()}/tmp/kotlin-classes/debug") {
         exclude(excludes)
     }
 
@@ -186,11 +162,11 @@ tasks.register<JacocoCoverageVerification>("jacocoCoverageVerification") {
     }
 }
 
-// JaCoCo unit test coverage report for the Default/Debug variant
+// JaCoCo unit test coverage report for the Debug variant
 tasks.register<JacocoReport>("jacocoUnitTestReport") {
-    dependsOn("testDefaultDebugUnitTest")
+    dependsOn("testDebugUnitTest")
     group = "Reporting"
-    description = "Generates JaCoCo unit test coverage report for DefaultDebug variant."
+    description = "Generates JaCoCo unit test coverage report for Debug variant."
 
     reports {
         xml.required.set(true)
@@ -206,10 +182,10 @@ tasks.register<JacocoReport>("jacocoUnitTestReport") {
         "**/*\$\$serializer.class"
     )
 
-    val javaClasses = fileTree("${layout.buildDirectory.get()}/intermediates/javac/DefaultDebug/compileDefaultDebugJavaWithJavac/classes") {
+    val javaClasses = fileTree("${layout.buildDirectory.get()}/intermediates/javac/debug/compileDebugJavaWithJavac/classes") {
         exclude(excludes)
     }
-    val kotlinClasses = fileTree("${layout.buildDirectory.get()}/tmp/kotlin-classes/DefaultDebug") {
+    val kotlinClasses = fileTree("${layout.buildDirectory.get()}/tmp/kotlin-classes/debug") {
         exclude(excludes)
     }
 

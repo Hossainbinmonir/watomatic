@@ -75,6 +75,7 @@ public class PreferencesManager {
     private final String KEY_SUBSCRIPTION_STATUS_LAST_CHECKED = "pref_subscription_status_last_checked";
     private final String KEY_REMAINING_ATOMS = "pref_remaining_atoms";
     private final String KEY_QUOTA_NOTIFICATION_LAST_SHOWN = "pref_quota_notification_last_shown";
+    private final String KEY_RULE_FALLBACK_TO_GLOBAL = "pref_rule_fallback_to_global";
     private static PreferencesManager _instance;
     private final SharedPreferences _sharedPrefs;
     private SharedPreferences _encryptedSharedPrefs;
@@ -732,6 +733,16 @@ public class PreferencesManager {
     public void setQuotaNotificationLastShown(long timestamp) {
         SharedPreferences.Editor editor = _sharedPrefs.edit();
         editor.putLong(KEY_QUOTA_NOTIFICATION_LAST_SHOWN, timestamp);
+        editor.apply();
+    }
+
+    public boolean isRuleFallbackToGlobalEnabled() {
+        return _sharedPrefs.getBoolean(KEY_RULE_FALLBACK_TO_GLOBAL, false);
+    }
+
+    public void setRuleFallbackToGlobalEnabled(boolean enabled) {
+        SharedPreferences.Editor editor = _sharedPrefs.edit();
+        editor.putBoolean(KEY_RULE_FALLBACK_TO_GLOBAL, enabled);
         editor.apply();
     }
 }

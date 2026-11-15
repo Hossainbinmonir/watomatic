@@ -42,6 +42,8 @@ import com.parishod.watomatic.model.utils.ContactsHelper;
 import com.parishod.watomatic.model.utils.DbUtils;
 import com.parishod.watomatic.model.utils.NotificationHelper;
 import com.parishod.watomatic.model.utils.NotificationUtils;
+import com.parishod.watomatic.model.rules.AutoReplyRule;
+import com.parishod.watomatic.service.rules.RuleNotificationProcessor;
 import com.parishod.watomatic.utils.FirebaseTokenRefresher;
 
 import java.util.ArrayList;
@@ -56,6 +58,7 @@ public class NotificationService extends NotificationListenerService {
     private final String TAG = NotificationService.class.getSimpleName();
     private DbUtils dbUtils;
     private NotificationReplyDecider replyDecider;
+    private RuleNotificationProcessor ruleNotificationProcessor;
 
     private NotificationReplyDecider getReplyDecider() {
         if (replyDecider == null) {
@@ -70,13 +73,39 @@ public class NotificationService extends NotificationListenerService {
         return replyDecider;
     }
 
+    private RuleNotificationProcessor getRuleNotificationProcessor() {
+        if (ruleNotificationProcessor == null) {
+            ruleNotificationProcessor = new RuleNotificationProcessor(getApplicationContext());
+        }
+        return ruleNotificationProcessor;
+    }
+
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         super.onNotificationPosted(sbn);
-        NotificationReplyDecider decider = getReplyDecider();
-        if (decider.canReply(sbn) && decider.shouldReply(sbn)) {
-            sendReply(sbn);
+        if (sbn == null) {
+            return;
         }
+        getRuleNotificationProcessor().processNotification(sbn, new RuleNotificationProcessor.ReplyDispatchCallback() {
+            @Override
+            public void onRuleMatchedSendReply(
+                    @NonNull StatusBarNotification statusBarNotification,
+                    @NonNull NotificationWear notificationWear,
+                    @NonNull String replyText,
+                    @NonNull AutoReplyRule matchedRule
+            ) {
+                Log.d(TAG, "Rule matched (" + matchedRule.getName() + "), dispatching reply.");
+                sendActualReply(statusBarNotification, notificationWear, replyText);
+            }
+
+            @Override
+            public void onFallbackToLegacy(@NonNull StatusBarNotification statusBarNotification) {
+                NotificationReplyDecider decider = getReplyDecider();
+                if (decider.canReply(statusBarNotification) && decider.shouldReply(statusBarNotification)) {
+                    sendReply(statusBarNotification);
+                }
+            }
+        });
     }
 
     @Override
@@ -109,7 +138,7 @@ public class NotificationService extends NotificationListenerService {
                 if (dbUtils == null) {
                     dbUtils = new DbUtils(getApplicationContext());
                 }
-                dbUtils.logReply(sbn, NotificationUtils.getTitle(sbn));
+                dbUtils.logReply(sbn, NotificationUtils.getTitle(sbn), replyText);
                 
                 // Use ReplyService to send the reply in foreground
                 /*Intent replyServiceIntent = new Intent(this, ReplyService.class);
@@ -538,6 +567,15 @@ public class NotificationService extends NotificationListenerService {
     public void onListenerConnected() {
         super.onListenerConnected();
         Toast.makeText(getApplicationContext(), "Listener connected!", Toast.LENGTH_SHORT).show();
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        if (ruleNotificationProcessor != null) {
+            ruleNotificationProcessor.shutdown();
+            ruleNotificationProcessor = null;
+        }
     }
 
 }

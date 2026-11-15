@@ -44,6 +44,7 @@ import com.parishod.watomatic.activity.about.AboutActivity;
 import com.parishod.watomatic.activity.contactselector.ContactSelectorActivity;
 import com.parishod.watomatic.activity.customreplyeditor.CustomReplyEditorActivity;
 import com.parishod.watomatic.activity.main.MainActivity;
+import com.parishod.watomatic.activity.rules.RuleDashboardActivity;
 import com.parishod.watomatic.activity.settings.SettingsActivity;
 import com.parishod.watomatic.model.App;
 import com.parishod.watomatic.model.CustomRepliesData;
@@ -54,6 +55,8 @@ import com.parishod.watomatic.model.data.MessageTypeItem;
 import com.parishod.watomatic.model.enums.DialogType;
 import com.parishod.watomatic.model.interfaces.DialogActionListener;
 import com.parishod.watomatic.model.preferences.PreferencesManager;
+import com.parishod.watomatic.model.rules.AutoReplyRule;
+import com.parishod.watomatic.model.rules.AutoReplyRulesDatabase;
 import com.parishod.watomatic.model.utils.Constants;
 import com.parishod.watomatic.model.utils.CustomDialog;
 import com.parishod.watomatic.model.utils.DbUtils;
@@ -63,6 +66,8 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import static android.content.Intent.ACTION_VIEW;
 import static android.content.Intent.CATEGORY_BROWSABLE;
@@ -90,6 +95,8 @@ public class MainFragment extends Fragment implements DialogActionListener {
     private TextView replyCooldownDescription, messageTypeDescription, contactsSelectorDescription;
     private LinearLayout contactsFilterLL, messagesTypeLL, supportedAppsLL, replyCooldownLL;
     private TextView enabledAppsCount;
+    private TextView multiRuleSummaryText;
+    private final ExecutorService rulesExecutor = Executors.newSingleThreadExecutor();
     private final List<String> communityUrls = Arrays.asList("tg://resolve?domain=WatomaticApp",
             "https://fosstodon.org/@watomatic",
             "https://twitter.com/watomatic",
@@ -185,11 +192,25 @@ public class MainFragment extends Fragment implements DialogActionListener {
         // Setup Edit button
         editButton.setOnClickListener(v -> openCustomReplyEditorActivity(v));
 
+        // Setup Multi-Rule Auto Responder Card
+        multiRuleSummaryText = view.findViewById(R.id.tv_multi_rule_summary);
+        View multiRuleCard = view.findViewById(R.id.card_multi_rule_responder);
+        View manageRulesBtn = view.findViewById(R.id.btn_manage_rules);
+        if (multiRuleCard != null) {
+            multiRuleCard.setOnClickListener(v -> openRuleDashboardActivity());
+        }
+        if (manageRulesBtn != null) {
+            manageRulesBtn.setOnClickListener(v -> openRuleDashboardActivity());
+        }
+
         // Setup Bottom Navigation
         bottomNav.setOnNavigationItemSelectedListener(item -> {
             int itemId = item.getItemId();
             if (itemId == R.id.navigation_atomatic) {
                 // Already on this screen
+                return true;
+            } else if (itemId == R.id.navigation_rules) {
+                openRuleDashboardActivity();
                 return true;
             } else if (itemId == R.id.navigation_community) {
                 // Handle community navigation
@@ -359,7 +380,44 @@ public class MainFragment extends Fragment implements DialogActionListener {
         updateContactsSelectorState();
         updateMessageType();
         updateCooldownFilterDisplay();
+        updateMultiRuleSummary();
         showAppRatingPopup();
+    }
+
+    private void openRuleDashboardActivity() {
+        startActivity(new Intent(requireActivity(), RuleDashboardActivity.class));
+    }
+
+    private void updateMultiRuleSummary() {
+        if (multiRuleSummaryText == null || getContext() == null) {
+            return;
+        }
+        final Context appContext = requireContext().getApplicationContext();
+        rulesExecutor.execute(() -> {
+            try {
+                AutoReplyRulesDatabase db = AutoReplyRulesDatabase.getInstance(appContext);
+                int total = db.ruleDao().getTotalRuleCountSync();
+                int active = db.ruleDao().getEnabledRuleCountSync();
+                if (isAdded() && multiRuleSummaryText != null) {
+                    multiRuleSummaryText.post(() -> {
+                        if (!isAdded()) return;
+                        if (total == 0) {
+                            multiRuleSummaryText.setText(R.string.multi_rule_card_summary_empty);
+                        } else {
+                            multiRuleSummaryText.setText(getString(R.string.multi_rule_card_summary, active, total));
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                Log.w("MainFragment", "Failed to load rule summary", e);
+            }
+        });
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        rulesExecutor.shutdown();
     }
 
     private void updateContactsSelectorState(){

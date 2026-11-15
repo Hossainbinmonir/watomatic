@@ -79,16 +79,14 @@ public class BrandingFragment extends Fragment {
 
         getGthubReleaseNotes();
 
-        if (BuildConfig.FLAVOR.equalsIgnoreCase("Default")) {
-            share_layout.setVisibility(View.GONE);
+        share_layout.setVisibility(View.GONE);
 
-            RelativeLayout circularProgressBarLayout = view.findViewById(R.id.circularProgressBar);
-            circularProgressBarLayout.setVisibility(View.VISIBLE);
-            circularProgressBarLayout.setOnClickListener(v -> {
-                Intent intent = new Intent(getActivity(), DonationActivity.class);
-                startActivity(intent);
-            });
-        }
+        RelativeLayout circularProgressBarLayout = view.findViewById(R.id.circularProgressBar);
+        circularProgressBarLayout.setVisibility(View.VISIBLE);
+        circularProgressBarLayout.setOnClickListener(v -> {
+            Intent intent = new Intent(getActivity(), DonationActivity.class);
+            startActivity(intent);
+        });
 
         return view;
     }
