@@ -3,6 +3,8 @@ package com.parishod.watomatic.model.utils;
 import android.content.Context;
 import android.service.notification.StatusBarNotification;
 
+import androidx.annotation.Nullable;
+
 import com.parishod.watomatic.model.CustomRepliesData;
 import com.parishod.watomatic.model.logs.AppPackage;
 import com.parishod.watomatic.model.logs.MessageLog;
@@ -20,6 +22,11 @@ public class DbUtils {
         return messageLogsDB.logsDao().getNumReplies();
     }
 
+    public int getUniqueReplyPairCount() {
+        MessageLogsDB messageLogsDB = MessageLogsDB.getInstance(mContext.getApplicationContext());
+        return messageLogsDB.logsDao().getUniqueReplyPairCountSync();
+    }
+
     public void purgeMessageLogs() {
         MessageLogsDB messageLogsDB = MessageLogsDB.getInstance(mContext.getApplicationContext());
         messageLogsDB.logsDao().purgeMessageLogs();
@@ -31,6 +38,16 @@ public class DbUtils {
     }
 
     public void logReply(StatusBarNotification sbn, String title, String repliedMsg) {
+        logReply(sbn, title, null, repliedMsg, null);
+    }
+
+    public void logReply(
+            StatusBarNotification sbn,
+            String title,
+            @Nullable String incomingMsg,
+            String repliedMsg,
+            @Nullable String matchedRuleName
+    ) {
         MessageLogsDB messageLogsDB = MessageLogsDB.getInstance(mContext.getApplicationContext());
         int packageIndex = messageLogsDB.appPackageDao().getPackageIndex(sbn.getPackageName());
         if (packageIndex <= 0) {
@@ -38,7 +55,15 @@ public class DbUtils {
             messageLogsDB.appPackageDao().insertAppPackage(appPackage);
             packageIndex = messageLogsDB.appPackageDao().getPackageIndex(sbn.getPackageName());
         }
-        MessageLog logs = new MessageLog(packageIndex, title, sbn.getNotification().when, repliedMsg, System.currentTimeMillis());
+        MessageLog logs = new MessageLog(
+                packageIndex,
+                title,
+                incomingMsg,
+                sbn.getNotification().when,
+                repliedMsg,
+                matchedRuleName,
+                System.currentTimeMillis()
+        );
         messageLogsDB.logsDao().logReply(logs);
     }
 

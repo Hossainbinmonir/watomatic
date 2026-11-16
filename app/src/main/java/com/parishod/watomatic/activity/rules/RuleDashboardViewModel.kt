@@ -26,7 +26,10 @@ data class RuleDashboardUiState(
     val inactiveRules: Int = 0,
     val displayedRules: List<AutoReplyRule> = emptyList(),
     val filterTab: RuleFilterTab = RuleFilterTab.ALL,
-    val searchQuery: String = ""
+    val searchQuery: String = "",
+    val availableCategories: List<String> = emptyList(),
+    val selectedCategory: String? = null,
+    val selectedCategoryHasActiveRules: Boolean = false
 )
 
 class RuleDashboardViewModel(application: Application) : AndroidViewModel(application) {
@@ -37,14 +40,26 @@ class RuleDashboardViewModel(application: Application) : AndroidViewModel(applic
 
     private val filterTab = MutableStateFlow(RuleFilterTab.ALL)
     private val searchQuery = MutableStateFlow("")
+    private val selectedCategory = MutableStateFlow<String?>(null)
 
     val uiState: StateFlow<RuleDashboardUiState> = combine(
         repository.allRules,
         filterTab,
-        searchQuery
-    ) { allRules, tab, query ->
+        searchQuery,
+        selectedCategory
+    ) { allRules, tab, query, category ->
         val activeCount = allRules.count { it.isEnabled }
         val inactiveCount = allRules.size - activeCount
+
+        val categories = allRules
+            .map { it.category.trim() }
+            .filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }
+            .sortedBy { it.lowercase() }
+
+        val effectiveCategory = category?.takeIf { sel ->
+            categories.any { it.equals(sel, ignoreCase = true) }
+        }
 
         val tabFiltered = when (tab) {
             RuleFilterTab.ALL -> allRules
@@ -52,15 +67,26 @@ class RuleDashboardViewModel(application: Application) : AndroidViewModel(applic
             RuleFilterTab.INACTIVE -> allRules.filter { !it.isEnabled }
         }
 
-        val trimmedQuery = query.trim()
-        val finalFiltered = if (trimmedQuery.isEmpty()) {
+        val categoryFiltered = if (effectiveCategory == null) {
             tabFiltered
         } else {
-            tabFiltered.filter { rule ->
+            tabFiltered.filter { it.category.trim().equals(effectiveCategory, ignoreCase = true) }
+        }
+
+        val trimmedQuery = query.trim()
+        val finalFiltered = if (trimmedQuery.isEmpty()) {
+            categoryFiltered
+        } else {
+            categoryFiltered.filter { rule ->
                 rule.name.contains(trimmedQuery, ignoreCase = true) ||
+                    rule.category.contains(trimmedQuery, ignoreCase = true) ||
                     rule.replyMessage.contains(trimmedQuery, ignoreCase = true) ||
                     rule.keywords.any { kw -> kw.contains(trimmedQuery, ignoreCase = true) }
             }
+        }
+
+        val selectedCategoryHasActive = effectiveCategory != null && allRules.any {
+            it.category.trim().equals(effectiveCategory, ignoreCase = true) && it.isEnabled
         }
 
         RuleDashboardUiState(
@@ -69,7 +95,10 @@ class RuleDashboardViewModel(application: Application) : AndroidViewModel(applic
             inactiveRules = inactiveCount,
             displayedRules = finalFiltered,
             filterTab = tab,
-            searchQuery = query
+            searchQuery = query,
+            availableCategories = categories,
+            selectedCategory = effectiveCategory,
+            selectedCategoryHasActiveRules = selectedCategoryHasActive
         )
     }.stateIn(
         scope = viewModelScope,
@@ -83,6 +112,16 @@ class RuleDashboardViewModel(application: Application) : AndroidViewModel(applic
 
     fun setSearchQuery(query: String) {
         searchQuery.value = query
+    }
+
+    fun setSelectedCategory(category: String?) {
+        selectedCategory.value = category?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    fun setCategoryRulesEnabled(category: String, enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.setCategoryEnabled(category, enabled)
+        }
     }
 
     fun toggleRuleEnabled(rule: AutoReplyRule, enabled: Boolean) {

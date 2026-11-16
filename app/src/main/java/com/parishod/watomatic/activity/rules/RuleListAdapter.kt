@@ -47,6 +47,7 @@ class RuleListAdapter(
         private val card: MaterialCardView = itemView.findViewById(R.id.rule_card)
         private val tvStatusBadge: TextView = itemView.findViewById(R.id.tv_rule_status_badge)
         private val tvPriorityBadge: TextView = itemView.findViewById(R.id.tv_rule_priority_badge)
+        private val tvCategoryBadge: TextView = itemView.findViewById(R.id.tv_rule_category_badge)
         private val tvName: TextView = itemView.findViewById(R.id.tv_rule_name)
         private val switchEnabled: MaterialSwitch = itemView.findViewById(R.id.switch_rule_enabled)
         private val tvApps: TextView = itemView.findViewById(R.id.tv_rule_apps)
@@ -65,14 +66,24 @@ class RuleListAdapter(
             tvName.text = rule.name
             tvPriorityBadge.text = ctx.getString(R.string.rule_priority_badge, rule.priority)
 
+            val trimmedCategory = rule.category.trim()
+            if (trimmedCategory.isNotEmpty()) {
+                tvCategoryBadge.visibility = View.VISIBLE
+                tvCategoryBadge.text = trimmedCategory
+            } else {
+                tvCategoryBadge.visibility = View.GONE
+            }
+
             if (rule.isEnabled) {
                 tvStatusBadge.text = ctx.getString(R.string.rule_status_active).uppercase(Locale.getDefault())
                 tvStatusBadge.setBackgroundResource(R.drawable.bg_badge_active)
+                tvStatusBadge.setTextColor(ContextCompat.getColor(ctx, R.color.badge_active_text))
                 card.alpha = 1.0f
             } else {
                 tvStatusBadge.text = ctx.getString(R.string.rule_status_inactive).uppercase(Locale.getDefault())
                 tvStatusBadge.setBackgroundResource(R.drawable.bg_badge_gray)
-                card.alpha = 0.82f
+                tvStatusBadge.setTextColor(ContextCompat.getColor(ctx, R.color.badge_gray_text))
+                card.alpha = 0.84f
             }
 
             switchEnabled.setOnCheckedChangeListener(null)
@@ -104,7 +115,6 @@ class RuleListAdapter(
             btnPriorityDown.isEnabled = rule.priority > 0
             btnPriorityUp.alpha = if (btnPriorityUp.isEnabled) 1.0f else 0.35f
             btnPriorityDown.alpha = if (btnPriorityDown.isEnabled) 1.0f else 0.35f
-            tvStatusBadge.setTextColor(ContextCompat.getColor(ctx, R.color.white))
         }
 
         private fun formatSelectedApps(ctx: Context, packages: List<String>): String {

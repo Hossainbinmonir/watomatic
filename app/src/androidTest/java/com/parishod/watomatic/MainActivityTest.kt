@@ -149,8 +149,8 @@ class MainActivityTest {
     }
 
     @Test
-    fun bottomNavCommunityItemIsDisplayed() {
-        onView(withId(R.id.navigation_community)).check(matches(isDisplayed()))
+    fun bottomNavRulesItemIsDisplayed() {
+        onView(withId(R.id.navigation_rules)).check(matches(isDisplayed()))
     }
 
     @Test
@@ -158,83 +158,10 @@ class MainActivityTest {
         onView(withId(R.id.navigation_settings)).check(matches(isDisplayed()))
     }
 
-    // --- Filters Section ---
+    // --- Multi-Rule Responder Card ---
 
     @Test
-    fun filterContactsRowIsDisplayed() {
-        onView(withId(R.id.filter_contacts)).perform(scrollTo()).check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun filterMessageTypeRowIsDisplayed() {
-        onView(withId(R.id.filter_message_type)).perform(scrollTo()).check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun filterAppsRowIsDisplayed() {
-        onView(withId(R.id.filter_apps)).perform(scrollTo()).check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun filterReplyCooldownRowIsDisplayed() {
-        onView(withId(R.id.filter_reply_cooldown)).perform(scrollTo()).check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun contactsFilterDescriptionIsDisplayed() {
-        onView(withId(R.id.contacts_filter_description))
-            .perform(scrollTo())
-            .check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun messageTypeDescriptionIsDisplayed() {
-        onView(withId(R.id.message_type_desc))
-            .perform(scrollTo())
-            .check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun enabledAppsCountIsDisplayed() {
-        onView(withId(R.id.enabled_apps_count))
-            .perform(scrollTo())
-            .check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun replyCooldownDescriptionIsDisplayed() {
-        onView(withId(R.id.reply_cooldown_description))
-            .perform(scrollTo())
-            .check(matches(isDisplayed()))
-    }
-
-    // --- Filter descriptions have content ---
-
-    @Test
-    fun contactsFilterDescriptionIsNotEmpty() {
-        onView(withId(R.id.contacts_filter_description))
-            .perform(scrollTo())
-            .check(matches(not(withText(""))))
-    }
-
-    @Test
-    fun messageTypeDescriptionIsNotEmpty() {
-        onView(withId(R.id.message_type_desc))
-            .perform(scrollTo())
-            .check(matches(not(withText(""))))
-    }
-
-    @Test
-    fun enabledAppsCountIsNotEmpty() {
-        onView(withId(R.id.enabled_apps_count))
-            .perform(scrollTo())
-            .check(matches(not(withText(""))))
-    }
-
-    @Test
-    fun replyCooldownDescriptionIsNotEmpty() {
-        onView(withId(R.id.reply_cooldown_description))
-            .perform(scrollTo())
-            .check(matches(not(withText(""))))
+    fun multiRuleResponderCardIsDisplayed() {
+        onView(withId(R.id.card_multi_rule_responder)).perform(scrollTo()).check(matches(isDisplayed()))
     }
 }

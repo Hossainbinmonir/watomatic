@@ -10,7 +10,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [AutoReplyRule::class, RuleExecutionLog::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(RuleTypeConverters::class)
@@ -24,12 +24,9 @@ abstract class AutoReplyRulesDatabase : RoomDatabase() {
         @Volatile
         private var instance: AutoReplyRulesDatabase? = null
 
-        /**
-         * Reference migration scaffold for future schema upgrades without data loss.
-         */
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // Reserved for future additive columns/indices while preserving user rules.
+                db.execSQL("ALTER TABLE auto_reply_rules ADD COLUMN category TEXT NOT NULL DEFAULT ''")
             }
         }
 

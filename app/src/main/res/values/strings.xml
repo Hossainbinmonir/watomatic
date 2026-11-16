@@ -591,4 +591,60 @@
     <string name="error_keyword_required">Add at least one keyword or pattern</string>
     <string name="error_reply_message_required">Please enter an automatic reply message</string>
     <string name="error_select_one_day">Select at least one active day when schedule is enabled</string>
+
+    <!-- Reply History -->
+    <string name="reply_history_card_title">Reply History</string>
+    <string name="reply_history_summary_empty">See which messages were replied to and how many times</string>
+    <string name="reply_history_summary_counts">%1$d replies sent • %2$d unique messages</string>
+    <string name="view_history">History</string>
+    <string name="reply_history_title">Reply History</string>
+    <string name="total_replies_sent_label">Total Replies</string>
+    <string name="unique_messages_label">Unique Messages</string>
+    <string name="search_history_hint">Search incoming message, reply, or sender</string>
+    <string name="history_tab_grouped">By Message (Count)</string>
+    <string name="history_tab_timeline">All Replies</string>
+    <string name="history_incoming_label">Incoming Message</string>
+    <string name="history_reply_sent_label">Reply Sent</string>
+    <string name="history_no_incoming_text">Notification from %1$s</string>
+    <string name="history_unknown_sender">Unknown contact</string>
+    <string name="history_reply_count_badge">%1$dx</string>
+    <string name="history_last_sender">Last: %1$s</string>
+    <string name="history_sender_label">From: %1$s</string>
+    <string name="history_source_default">Default Reply</string>
+    <string name="history_source_ai">AI Reply</string>
+    <string name="history_clear_all">Clear All</string>
+    <string name="history_clear_title">Clear Reply History?</string>
+    <string name="history_clear_message">Are you sure you want to delete all recorded reply history? This action cannot be undone.</string>
+    <string name="history_cleared_toast">Reply history cleared</string>
+    <string name="history_delete_entry">Delete history entry</string>
+    <string name="empty_history_title">No Reply History Yet</string>
+    <string name="empty_history_subtitle">Once Auto Reply responds to incoming messages, each message, its reply, and reply count will appear here.</string>
+    <string name="empty_filtered_history">No history entries match your search.</string>
+
+    <!-- Optional Rule Categories -->
+    <string name="rule_category_label">Category (Optional)</string>
+    <string name="rule_category_hint">e.g. Business, Support, Personal</string>
+    <string name="rule_category_helper">Leave empty or pick/type a tag to organize rules and toggle groups together.</string>
+    <string name="rule_category_all">All Categories</string>
+    <string name="rule_category_pause_all">Pause \"%1$s\"</string>
+    <string name="rule_category_enable_all">Enable \"%1$s\"</string>
+    <string name="rule_category_paused_toast">Paused all rules in \"%1$s\"</string>
+    <string name="rule_category_enabled_toast">Enabled all rules in \"%1$s\"</string>
+    <string name="category_business">Business</string>
+    <string name="category_support">Support</string>
+    <string name="category_sales">Sales</string>
+    <string name="category_personal">Personal</string>
+    <string name="category_office">Office</string>
+
+    <!-- AI Model Fetching & Configuration -->
+    <string name="ai_models_fetching">Fetching available models…</string>
+    <string name="ai_models_loaded">%1$d models loaded from %2$s</string>
+    <string name="ai_models_fallback_notice">Showing recommended models (%1$s). You can still select or type any model ID.</string>
+    <string name="ai_models_enter_key_hint">Enter your API key to fetch live models, or pick/type a model directly.</string>
+    <string name="ai_models_refresh_desc">Refresh models</string>
+
+    <!-- Home Minimal Status -->
+    <string name="home_active_status">Auto-reply active</string>
+    <string name="home_paused_status">Auto-reply paused</string>
+    <string name="home_default_reply_eyebrow">DEFAULT AUTO-REPLY</string>
 </resources>

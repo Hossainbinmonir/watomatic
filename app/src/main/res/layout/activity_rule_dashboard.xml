@@ -11,7 +11,7 @@
         android:id="@+id/appbar_layout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="?attr/colorSurface"
+        android:background="@color/app_canvas_bg"
         app:elevation="0dp">
 
         <com.google.android.material.appbar.MaterialToolbar
@@ -76,7 +76,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="16dp"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="8dp"
             android:baselineAligned="false"
             android:orientation="horizontal">
 
@@ -87,16 +87,17 @@
                 android:layout_marginEnd="6dp"
                 android:layout_weight="1"
                 app:cardBackgroundColor="@color/rule_stat_total_bg"
-                app:cardCornerRadius="16dp"
+                app:cardCornerRadius="14dp"
                 app:cardElevation="0dp"
-                app:strokeWidth="0dp">
+                app:strokeColor="@color/rule_card_stroke"
+                app:strokeWidth="1dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:gravity="center"
                     android:orientation="vertical"
-                    android:paddingVertical="14dp"
+                    android:paddingVertical="12dp"
                     android:paddingHorizontal="8dp">
 
                     <TextView
@@ -106,7 +107,7 @@
                         android:fontFamily="@font/inter_bold"
                         android:text="0"
                         android:textColor="?attr/colorPrimary"
-                        android:textSize="22sp" />
+                        android:textSize="21sp" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -114,7 +115,7 @@
                         android:layout_marginTop="2dp"
                         android:fontFamily="@font/inter_medium"
                         android:text="@string/total_rules_label"
-                        android:textColor="?android:attr/textColorSecondary"
+                        android:textColor="@color/text_secondary"
                         android:textSize="12sp" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -126,16 +127,17 @@
                 android:layout_marginHorizontal="3dp"
                 android:layout_weight="1"
                 app:cardBackgroundColor="@color/rule_stat_active_bg"
-                app:cardCornerRadius="16dp"
+                app:cardCornerRadius="14dp"
                 app:cardElevation="0dp"
-                app:strokeWidth="0dp">
+                app:strokeColor="@color/rule_card_stroke"
+                app:strokeWidth="1dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:gravity="center"
                     android:orientation="vertical"
-                    android:paddingVertical="14dp"
+                    android:paddingVertical="12dp"
                     android:paddingHorizontal="8dp">
 
                     <TextView
@@ -145,7 +147,7 @@
                         android:fontFamily="@font/inter_bold"
                         android:text="0"
                         android:textColor="@color/rule_active_accent"
-                        android:textSize="22sp" />
+                        android:textSize="21sp" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -153,7 +155,7 @@
                         android:layout_marginTop="2dp"
                         android:fontFamily="@font/inter_medium"
                         android:text="@string/active_rules_label"
-                        android:textColor="?android:attr/textColorSecondary"
+                        android:textColor="@color/text_secondary"
                         android:textSize="12sp" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -165,16 +167,17 @@
                 android:layout_marginStart="6dp"
                 android:layout_weight="1"
                 app:cardBackgroundColor="@color/rule_stat_inactive_bg"
-                app:cardCornerRadius="16dp"
+                app:cardCornerRadius="14dp"
                 app:cardElevation="0dp"
-                app:strokeWidth="0dp">
+                app:strokeColor="@color/rule_card_stroke"
+                app:strokeWidth="1dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:gravity="center"
                     android:orientation="vertical"
-                    android:paddingVertical="14dp"
+                    android:paddingVertical="12dp"
                     android:paddingHorizontal="8dp">
 
                     <TextView
@@ -184,7 +187,7 @@
                         android:fontFamily="@font/inter_bold"
                         android:text="0"
                         android:textColor="@color/rule_inactive_accent"
-                        android:textSize="22sp" />
+                        android:textSize="21sp" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -192,7 +195,7 @@
                         android:layout_marginTop="2dp"
                         android:fontFamily="@font/inter_medium"
                         android:text="@string/inactive_rules_label"
-                        android:textColor="?android:attr/textColorSecondary"
+                        android:textColor="@color/text_secondary"
                         android:textSize="12sp" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -230,7 +233,7 @@
                         android:layout_height="wrap_content"
                         android:fontFamily="@font/inter_medium"
                         android:text="@string/rule_fallback_toggle_title"
-                        android:textColor="?android:attr/textColorPrimary"
+                        android:textColor="@color/text_primary"
                         android:textSize="14sp" />
 
                     <TextView
@@ -238,7 +241,7 @@
                         android:layout_height="wrap_content"
                         android:fontFamily="@font/noto_sans"
                         android:text="@string/rule_fallback_toggle_desc"
-                        android:textColor="?android:attr/textColorSecondary"
+                        android:textColor="@color/text_secondary"
                         android:textSize="12sp" />
                 </LinearLayout>
 
@@ -303,6 +306,48 @@
                 android:layout_height="wrap_content"
                 android:text="@string/filter_inactive" />
         </com.google.android.material.chip.ChipGroup>
+
+        <!-- Optional Category Filter Strip (visible when categories exist) -->
+        <HorizontalScrollView
+            android:id="@+id/category_filter_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:clipToPadding="false"
+            android:paddingHorizontal="16dp"
+            android:scrollbars="none"
+            android:visibility="gone"
+            tools:visibility="visible">
+
+            <com.google.android.material.chip.ChipGroup
+                android:id="@+id/chip_group_category_filter"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                app:selectionRequired="true"
+                app:singleLine="true"
+                app:singleSelection="true" />
+        </HorizontalScrollView>
+
+        <!-- Bulk Category Toggle Bar (visible when a specific category is selected) -->
+        <LinearLayout
+            android:id="@+id/category_bulk_bar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginTop="2dp"
+            android:gravity="center_vertical|end"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_toggle_category_rules"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:minHeight="40dp"
+                android:textSize="12sp"
+                app:cornerRadius="10dp"
+                tools:text="Pause &quot;Business&quot;" />
+        </LinearLayout>
 
         <!-- Rule List + Empty State -->
         <FrameLayout

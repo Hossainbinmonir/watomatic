@@ -6,8 +6,6 @@ import android.service.notification.StatusBarNotification
 import android.text.SpannableString
 import android.util.Log
 import com.parishod.watomatic.NotificationWear
-import com.parishod.watomatic.R
-import com.parishod.watomatic.model.CustomRepliesData
 import com.parishod.watomatic.model.preferences.PreferencesManager
 import com.parishod.watomatic.model.rules.AutoReplyRule
 import com.parishod.watomatic.model.rules.AutoReplyRulesDatabase
@@ -137,7 +135,7 @@ class RuleNotificationProcessor @JvmOverloads constructor(
                     return@execute
                 }
 
-                val finalReplyText = formatReplyWithAttribution(result.replyText, prefs)
+                val finalReplyText = result.replyText
                 val delaySeconds = result.rule.replyDelaySeconds.coerceIn(0, MAX_DELAY_SECONDS)
 
                 val dispatchAction = Runnable {
@@ -166,19 +164,6 @@ class RuleNotificationProcessor @JvmOverloads constructor(
                 Log.e(TAG, "Error evaluating auto-reply rules", e)
             }
         }
-    }
-
-    private fun formatReplyWithAttribution(
-        replyText: String,
-        prefs: PreferencesManager
-    ): String {
-        if (!prefs.isAppendWatomaticAttributionEnabled) return replyText
-        val attribution = try {
-            appContext.getString(R.string.sent_using_Watomatic)
-        } catch (_: Exception) {
-            "Sent using Watomatic"
-        }
-        return "$replyText\n\n${CustomRepliesData.RTL_ALIGN_INVISIBLE_CHAR}$attribution"
     }
 
     private fun buildSignature(

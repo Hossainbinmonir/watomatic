@@ -1,9 +1,11 @@
 package com.parishod.watomatic.model.logs;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.room.ColumnInfo;
 import androidx.room.Entity;
 import androidx.room.ForeignKey;
+import androidx.room.Ignore;
 import androidx.room.Index;
 import androidx.room.PrimaryKey;
 
@@ -27,12 +29,18 @@ public class MessageLog {
     private String notifId;
     @ColumnInfo(name = "notif_title")
     private String notifTitle;
+    @ColumnInfo(name = "notif_incoming_msg")
+    @Nullable
+    private String notifIncomingMsg;
     @ColumnInfo(name = "notif_arrived_time")
     private long notifArrivedTime;
     @ColumnInfo(name = "notif_is_replied")
     private boolean notifIsReplied;
     @ColumnInfo(name = "notif_replied_msg")
     private String notifRepliedMsg;
+    @ColumnInfo(name = "matched_rule_name")
+    @Nullable
+    private String matchedRuleName;
     @ColumnInfo(name = "notif_reply_time")
     private long notifReplyTime;
 
@@ -49,6 +57,20 @@ public class MessageLog {
         this.notifRepliedMsg = notifRepliedMsg;
         this.notifReplyTime = notifReplyTime;
         this.notifIsReplied = true;
+    }
+
+    @Ignore
+    public MessageLog(int index,
+                      String notifTitle,
+                      @Nullable String notifIncomingMsg,
+                      long notifArrivedTime,
+                      String notifRepliedMsg,
+                      @Nullable String matchedRuleName,
+                      long notifReplyTime
+    ) {
+        this(index, notifTitle, notifArrivedTime, notifRepliedMsg, notifReplyTime);
+        this.notifIncomingMsg = notifIncomingMsg;
+        this.matchedRuleName = matchedRuleName;
     }
 
     public int getId() {
@@ -83,6 +105,15 @@ public class MessageLog {
         this.notifTitle = notifTitle;
     }
 
+    @Nullable
+    public String getNotifIncomingMsg() {
+        return notifIncomingMsg;
+    }
+
+    public void setNotifIncomingMsg(@Nullable String notifIncomingMsg) {
+        this.notifIncomingMsg = notifIncomingMsg;
+    }
+
     public long getNotifArrivedTime() {
         return notifArrivedTime;
     }
@@ -105,6 +136,15 @@ public class MessageLog {
 
     public void setNotifRepliedMsg(String notifRepliedMsg) {
         this.notifRepliedMsg = notifRepliedMsg;
+    }
+
+    @Nullable
+    public String getMatchedRuleName() {
+        return matchedRuleName;
+    }
+
+    public void setMatchedRuleName(@Nullable String matchedRuleName) {
+        this.matchedRuleName = matchedRuleName;
     }
 
     public long getNotifReplyTime() {

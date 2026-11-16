@@ -4,7 +4,8 @@
         <!-- Primary brand color. -->
         <item name="colorPrimary">@color/primary</item>
         <item name="colorPrimaryVariant">@color/primary_dark</item>
+        <item name="android:windowBackground">@color/app_canvas_bg</item>
+        <item name="colorSurface">@color/rule_card_bg</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
-        <!-- Customize your theme here. -->
     </style>
 </resources>

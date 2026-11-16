@@ -1,21 +1,42 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <color name="primary">#6EAAD0</color>
+    <color name="primary_dark">#4D88AE</color>
+
+    <color name="app_canvas_bg">#10141A</color>
+    <color name="text_primary">#E8ECF2</color>
+    <color name="text_secondary">#9BA6B6</color>
+
+    <color name="search_background">#171C24</color>
+    <color name="search_stroke_color">#27303D</color>
+    <color name="icon_circle_primary_bg">#1D2B3A</color>
+    <color name="icon_circle_green_bg">#172C21</color>
+
     <!-- Home Screen Auto Reply Text (dark) -->
-    <color name="gradient_start">#33000000</color> <!-- subtle dark fade -->
-    <color name="gradient_end">#99000000</color>   <!-- stronger dark overlay -->
+    <color name="gradient_start">#33000000</color>
+    <color name="gradient_end">#99000000</color>
 
     <!-- Option Selection Colors -->
-    <color name="selected_option_background">#2C2C2C</color>
-    <color name="unselected_option_background">#1E1E1E</color>
+    <color name="selected_option_background">#222A35</color>
+    <color name="unselected_option_background">#171C24</color>
+    <color name="card_stroke_default">#2A3342</color>
 
-    <!-- Multi-Rule Auto Responder Dark Colors -->
-    <color name="rule_card_stroke">#2E3440</color>
-    <color name="rule_card_bg">#1B1F27</color>
-    <color name="rule_reply_box_bg">#222834</color>
-    <color name="rule_stat_total_bg">#1D2B44</color>
-    <color name="rule_stat_active_bg">#163322</color>
-    <color name="rule_stat_inactive_bg">#252830</color>
-    <color name="rule_active_accent">#4ADE80</color>
-    <color name="rule_inactive_accent">#9CA3AF</color>
-    <color name="rule_danger">#EF5350</color>
+    <!-- Multi-Rule & History Dark Colors -->
+    <color name="rule_card_stroke">#27303D</color>
+    <color name="rule_card_bg">#171C24</color>
+    <color name="rule_reply_box_bg">#1E2530</color>
+    <color name="rule_stat_total_bg">#1A2736</color>
+    <color name="rule_stat_active_bg">#142B1E</color>
+    <color name="rule_stat_inactive_bg">#1E232B</color>
+    <color name="rule_active_accent">#56CA85</color>
+    <color name="rule_inactive_accent">#9BA6B6</color>
+    <color name="rule_danger">#EF6B6B</color>
+
+    <!-- Soft Classic Badges -->
+    <color name="badge_active_bg">#163322</color>
+    <color name="badge_active_text">#6FD99A</color>
+    <color name="badge_gray_bg">#242B36</color>
+    <color name="badge_gray_text">#B6C0CE</color>
+    <color name="badge_category_bg">#1E3144</color>
+    <color name="badge_category_text">#8FC5E8</color>
 </resources>

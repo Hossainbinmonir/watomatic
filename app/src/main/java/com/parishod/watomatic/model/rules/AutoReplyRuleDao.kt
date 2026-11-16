@@ -46,6 +46,9 @@ interface AutoReplyRuleDao {
     @Query("UPDATE auto_reply_rules SET is_enabled = :enabled, updated_at = :updatedAt WHERE id = :id")
     suspend fun setRuleEnabled(id: Long, enabled: Boolean, updatedAt: Long = System.currentTimeMillis())
 
+    @Query("UPDATE auto_reply_rules SET is_enabled = :enabled, updated_at = :updatedAt WHERE LOWER(TRIM(category)) = LOWER(TRIM(:category))")
+    suspend fun setCategoryEnabled(category: String, enabled: Boolean, updatedAt: Long = System.currentTimeMillis())
+
     @Query("UPDATE auto_reply_rules SET priority = :priority, updated_at = :updatedAt WHERE id = :id")
     suspend fun updateRulePriority(id: Long, priority: Int, updatedAt: Long = System.currentTimeMillis())
 }

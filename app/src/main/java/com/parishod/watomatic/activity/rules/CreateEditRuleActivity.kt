@@ -92,6 +92,7 @@ class CreateEditRuleActivity : BaseActivity() {
         editingRuleId = intent.getLongExtra(EXTRA_RULE_ID, -1L)
 
         setupToolbar()
+        setupCategorySection()
         setupApplicationsSection()
         setupMatchConditionsSection()
         setupKeywordsSection()
@@ -119,6 +120,52 @@ class CreateEditRuleActivity : BaseActivity() {
         )
         binding.toolbar.setNavigationOnClickListener {
             onBackPressedDispatcher.onBackPressed()
+        }
+    }
+
+    private fun setupCategorySection() {
+        val defaultSuggestions = listOf(
+            getString(R.string.category_business),
+            getString(R.string.category_support),
+            getString(R.string.category_sales),
+            getString(R.string.category_personal),
+            getString(R.string.category_office)
+        )
+        lifecycleScope.launch {
+            val savedCategories = withContext(Dispatchers.IO) {
+                repository.getAllRulesOnce()
+                    .map { it.category.trim() }
+                    .filter { it.isNotEmpty() }
+            }
+            val merged = (savedCategories + defaultSuggestions)
+                .distinctBy { it.lowercase() }
+            renderCategorySuggestions(merged)
+        }
+    }
+
+    private fun renderCategorySuggestions(suggestions: List<String>) {
+        binding.chipGroupCategorySuggestions.removeAllViews()
+        val currentCat = binding.etRuleCategory.text?.toString()?.trim().orEmpty()
+        for (cat in suggestions) {
+            val chip = Chip(this).apply {
+                id = View.generateViewId()
+                text = cat
+                isCheckable = true
+                isChecked = currentCat.equals(cat, ignoreCase = true)
+                setOnClickListener {
+                    isPopulating = true
+                    if (binding.etRuleCategory.text?.toString()?.trim().equals(cat, ignoreCase = true)) {
+                        binding.etRuleCategory.setText("")
+                        isChecked = false
+                    } else {
+                        binding.etRuleCategory.setText(cat)
+                        binding.etRuleCategory.setSelection(cat.length)
+                    }
+                    isPopulating = false
+                    markDirty()
+                }
+            }
+            binding.chipGroupCategorySuggestions.addView(chip)
         }
     }
 
@@ -333,6 +380,7 @@ class CreateEditRuleActivity : BaseActivity() {
             override fun afterTextChanged(s: Editable?) = markDirty()
         }
         binding.etRuleName.addTextChangedListener(simpleWatcher)
+        binding.etRuleCategory.addTextChangedListener(simpleWatcher)
         binding.etReplyMessage.addTextChangedListener(simpleWatcher)
         binding.etPriority.addTextChangedListener(simpleWatcher)
         binding.etReplyDelay.addTextChangedListener(simpleWatcher)
@@ -536,6 +584,8 @@ class CreateEditRuleActivity : BaseActivity() {
     private fun populateForm(rule: AutoReplyRule) {
         isPopulating = true
         binding.etRuleName.setText(rule.name)
+        binding.etRuleCategory.setText(rule.category)
+        syncCategorySuggestionSelection(rule.category)
         binding.switchRuleActive.isChecked = rule.isEnabled
 
         selectedPackages.clear()
@@ -702,9 +752,12 @@ class CreateEditRuleActivity : BaseActivity() {
             else -> ContactFilterMode.ALL
         }
 
+        val ruleCategory = binding.etRuleCategory.text?.toString()?.trim().orEmpty()
+
         val ruleToSave = AutoReplyRule(
             id = existingRule?.id ?: 0L,
             name = ruleName,
+            category = ruleCategory,
             isEnabled = binding.switchRuleActive.isChecked,
             selectedPackages = selectedPackages.toList(),
             matchType = selectedMatchType,
@@ -752,6 +805,14 @@ class CreateEditRuleActivity : BaseActivity() {
         if (binding.chipDaySat.isChecked) days.add(6)
         if (binding.chipDaySun.isChecked) days.add(7)
         return days
+    }
+
+    private fun syncCategorySuggestionSelection(category: String) {
+        val trimmed = category.trim()
+        for (i in 0 until binding.chipGroupCategorySuggestions.childCount) {
+            val chip = binding.chipGroupCategorySuggestions.getChildAt(i) as? Chip ?: continue
+            chip.isChecked = trimmed.isNotEmpty() && chip.text.toString().equals(trimmed, ignoreCase = true)
+        }
     }
 
     private fun markDirty() {

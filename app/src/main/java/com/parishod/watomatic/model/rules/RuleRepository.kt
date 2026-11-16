@@ -44,6 +44,10 @@ class RuleRepository(
         ruleDao.setRuleEnabled(ruleId, enabled, System.currentTimeMillis())
     }
 
+    suspend fun setCategoryEnabled(category: String, enabled: Boolean) {
+        ruleDao.setCategoryEnabled(category.trim(), enabled, System.currentTimeMillis())
+    }
+
     suspend fun updateRulePriority(ruleId: Long, priority: Int) {
         ruleDao.updateRulePriority(ruleId, priority.coerceIn(0, 100), System.currentTimeMillis())
     }

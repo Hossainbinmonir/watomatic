@@ -45,13 +45,9 @@ import static android.content.Intent.FLAG_ACTIVITY_REQUIRE_DEFAULT;
 import static android.content.Intent.FLAG_ACTIVITY_REQUIRE_NON_BROWSER;
 
 public class BrandingFragment extends Fragment {
-    private Button watomaticSubredditBtn, whatsNewBtn;
+    private Button whatsNewBtn;
     private List<String> whatsNewUrls;
     private int gitHubReleaseNotesId = -1;
-    private final List<String> communityUrls = Arrays.asList("https://t.me/WatomaticApp",
-            "https://fosstodon.org/@watomatic",
-            "https://twitter.com/watomatic",
-            "https://www.reddit.com/r/watomatic");
 
     @Nullable
     @Override
@@ -60,15 +56,10 @@ public class BrandingFragment extends Fragment {
 
         ImageButton githubBtn = view.findViewById(R.id.watomaticGithubBtn);
         ImageButton share_layout = view.findViewById(R.id.share_btn);
-        watomaticSubredditBtn = view.findViewById(R.id.watomaticSubredditBtn);
         whatsNewBtn = view.findViewById(R.id.whatsNewBtn);
         whatsNewBtn.setOnClickListener(v -> launchApp(whatsNewUrls, getString(R.string.watomatic_github_latest_release_url)));
 
         share_layout.setOnClickListener(v -> launchShareIntent());
-
-        watomaticSubredditBtn.setOnClickListener(v -> {
-            launchApp(communityUrls, getString(R.string.watomatic_subreddit_url));
-        });
 
         githubBtn.setOnClickListener(v -> {
             String url = getString(R.string.watomatic_github_url);
@@ -214,7 +205,6 @@ public class BrandingFragment extends Fragment {
     }
 
     private void showHideWhatsNewBtn(boolean show) {
-        watomaticSubredditBtn.setVisibility(show ? View.GONE : View.VISIBLE);
         whatsNewBtn.setVisibility(show ? View.VISIBLE : View.GONE);
     }
 

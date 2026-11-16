@@ -12,6 +12,9 @@ data class AutoReplyRule(
     @ColumnInfo(name = "name")
     val name: String,
 
+    @ColumnInfo(name = "category", defaultValue = "")
+    val category: String = "",
+
     @ColumnInfo(name = "is_enabled")
     val isEnabled: Boolean = true,
 

@@ -10,7 +10,7 @@
     android:focusable="true"
     app:cardBackgroundColor="@color/rule_card_bg"
     app:cardCornerRadius="16dp"
-    app:cardElevation="1dp"
+    app:cardElevation="0dp"
     app:strokeColor="@color/rule_card_stroke"
     app:strokeWidth="1dp">
 
@@ -20,7 +20,7 @@
         android:orientation="vertical"
         android:padding="16dp">
 
-        <!-- Header Row: Status, Name, Priority, Switch -->
+        <!-- Header Row: Status, Priority, Category, Name, Switch -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -47,7 +47,7 @@
                         android:fontFamily="@font/inter_bold"
                         android:paddingHorizontal="8dp"
                         android:paddingVertical="3dp"
-                        android:textColor="@color/white"
+                        android:textColor="@color/badge_active_text"
                         android:textSize="10sp"
                         tools:text="ACTIVE" />
 
@@ -60,20 +60,38 @@
                         android:fontFamily="@font/inter_medium"
                         android:paddingHorizontal="8dp"
                         android:paddingVertical="3dp"
-                        android:textColor="@color/white"
+                        android:textColor="@color/badge_gray_text"
                         android:textSize="10sp"
                         tools:text="Priority 20" />
+
+                    <TextView
+                        android:id="@+id/tv_rule_category_badge"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="6dp"
+                        android:background="@drawable/bg_badge_category"
+                        android:ellipsize="end"
+                        android:fontFamily="@font/inter_medium"
+                        android:maxLines="1"
+                        android:maxWidth="110dp"
+                        android:paddingHorizontal="8dp"
+                        android:paddingVertical="3dp"
+                        android:textColor="@color/badge_category_text"
+                        android:textSize="10sp"
+                        android:visibility="gone"
+                        tools:text="Business"
+                        tools:visibility="visible" />
                 </LinearLayout>
 
                 <TextView
                     android:id="@+id/tv_rule_name"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
+                    android:layout_marginTop="8dp"
                     android:ellipsize="end"
                     android:fontFamily="@font/inter_bold"
                     android:maxLines="1"
-                    android:textColor="?android:attr/textColorPrimary"
+                    android:textColor="@color/text_primary"
                     android:textSize="17sp"
                     tools:text="After-Hours Support" />
             </LinearLayout>
@@ -106,7 +124,7 @@
             android:ellipsize="end"
             android:fontFamily="@font/noto_sans"
             android:maxLines="2"
-            android:textColor="?android:attr/textColorSecondary"
+            android:textColor="@color/text_secondary"
             android:textSize="13sp"
             tools:text="Contains: price, pricing, cost" />
 
@@ -115,9 +133,10 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
-            android:background="@color/rule_reply_box_bg"
+            android:background="@drawable/bg_reply_quote_box"
             android:orientation="vertical"
-            android:padding="10dp">
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="10dp">
 
             <TextView
                 android:id="@+id/tv_rule_reply_preview"
@@ -126,7 +145,7 @@
                 android:ellipsize="end"
                 android:fontFamily="@font/noto_sans"
                 android:maxLines="2"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="@color/text_primary"
                 android:textSize="13sp"
                 tools:text="Thanks for reaching out! Our team will reply shortly." />
         </LinearLayout>

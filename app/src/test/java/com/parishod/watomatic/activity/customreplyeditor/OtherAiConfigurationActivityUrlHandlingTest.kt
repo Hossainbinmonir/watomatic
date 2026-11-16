@@ -8,6 +8,7 @@ import android.widget.AutoCompleteTextView
 import androidx.preference.PreferenceManager
 import androidx.test.core.app.ApplicationProvider
 import com.google.android.material.textfield.TextInputEditText
+import com.google.gson.JsonParser
 import com.parishod.watomatic.R
 import com.parishod.watomatic.model.preferences.PreferencesManager
 import com.parishod.watomatic.network.model.openai.OpenAIModelsResponse
@@ -384,5 +385,101 @@ class OtherAiConfigurationActivityUrlHandlingTest {
         field.isAccessible = true
         val value = field.getLong(null)
         assertEquals("Debounce should be 500ms", 500L, value)
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. Model endpoint URL building & response parsing
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `buildModelsEndpointUrl avoids duplicate version segments`() {
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            OtherAiConfigurationActivity.ModelUrlAndParser.buildModelsEndpointUrl(
+                "Gemini",
+                "https://generativelanguage.googleapis.com/"
+            )
+        )
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            OtherAiConfigurationActivity.ModelUrlAndParser.buildModelsEndpointUrl(
+                "Gemini",
+                "https://generativelanguage.googleapis.com/v1beta/"
+            )
+        )
+        assertEquals(
+            "https://api.openai.com/v1/models",
+            OtherAiConfigurationActivity.ModelUrlAndParser.buildModelsEndpointUrl(
+                "OpenAI",
+                "https://api.openai.com/"
+            )
+        )
+        assertEquals(
+            "https://openrouter.ai/api/v1/models",
+            OtherAiConfigurationActivity.ModelUrlAndParser.buildModelsEndpointUrl(
+                "OpenAI Compatible",
+                "https://openrouter.ai/api/v1/"
+            )
+        )
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/openai/models",
+            OtherAiConfigurationActivity.ModelUrlAndParser.buildModelsEndpointUrl(
+                "OpenAI Compatible",
+                "https://generativelanguage.googleapis.com/v1beta/openai/"
+            )
+        )
+    }
+
+    @Test
+    fun `parseModelsResponse parses Gemini OpenAI and array formats`() {
+        val geminiJson = JsonParser.parseString(
+            """
+            {
+              "models": [
+                {
+                  "name": "models/gemini-2.5-flash",
+                  "supportedGenerationMethods": ["generateContent", "countTokens"]
+                },
+                {
+                  "name": "models/embedding-001",
+                  "supportedGenerationMethods": ["embedContent"]
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+        assertEquals(
+            listOf("gemini-2.5-flash"),
+            OtherAiConfigurationActivity.ModelUrlAndParser.parseModelsResponse("Gemini", geminiJson)
+        )
+
+        val openAiJson = JsonParser.parseString(
+            """
+            {
+              "data": [
+                { "id": "gpt-4o-mini" },
+                { "id": "gpt-4o" }
+              ]
+            }
+            """.trimIndent()
+        )
+        assertEquals(
+            listOf("gpt-4o-mini", "gpt-4o"),
+            OtherAiConfigurationActivity.ModelUrlAndParser.parseModelsResponse("OpenAI", openAiJson)
+        )
+
+        val arrayJson = JsonParser.parseString("""["llama-3.3-70b", "qwen-2.5"]""")
+        assertEquals(
+            listOf("llama-3.3-70b", "qwen-2.5"),
+            OtherAiConfigurationActivity.ModelUrlAndParser.parseModelsResponse("OpenAI Compatible", arrayJson)
+        )
+    }
+
+    @Test
+    fun `recommended models are immediately available in model dropdown`() {
+        val modelInput = activity.findViewById<AutoCompleteTextView>(R.id.modelAutoCompleteTextView)
+        val adapter = modelInput.adapter
+        assertNotNull("Model adapter should be initialized", adapter)
+        assertTrue("Recommended OpenAI models should populate adapter", adapter.count > 0)
     }
 }

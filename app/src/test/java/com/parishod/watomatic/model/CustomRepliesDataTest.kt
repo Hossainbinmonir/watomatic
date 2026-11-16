@@ -176,13 +176,13 @@ class CustomRepliesDataTest {
     }
 
     @Test
-    fun `getTextToSendOrElse returns non-empty string when automatic AI enabled`() {
+    fun `getTextToSendOrElse returns custom reply when automatic AI pref set without BYOK`() {
         val prefsInstance = PreferencesManager.getPreferencesInstance(context)
         prefsInstance.setEnableAutomaticAiReplies(true)
         val instance = CustomRepliesData.getInstance(context)
+        instance.set("My reply")
         val result = instance.getTextToSendOrElse()
-        assertNotNull(result)
-        assertTrue(result.isNotEmpty())
+        assertEquals("My reply", result)
     }
 
     @Test
@@ -196,13 +196,14 @@ class CustomRepliesDataTest {
     }
 
     @Test
-    fun `getTextToSendOrElse appends RTL attribution when attribution enabled`() {
+    fun `getTextToSendOrElse never appends RTL attribution even if preference enabled`() {
         val prefsInstance = PreferencesManager.getPreferencesInstance(context)
         prefsInstance.setAppendWatomaticAttribution(true)
         val instance = CustomRepliesData.getInstance(context)
         instance.set("My reply")
         val result = instance.getTextToSendOrElse()
-        assertTrue(result.contains(CustomRepliesData.RTL_ALIGN_INVISIBLE_CHAR))
+        assertEquals("My reply", result)
+        assertFalse(result.contains(CustomRepliesData.RTL_ALIGN_INVISIBLE_CHAR))
     }
 
     @Test
@@ -216,13 +217,13 @@ class CustomRepliesDataTest {
     }
 
     @Test
-    fun `getTextToSendOrElse AI result does not equal custom reply text`() {
+    fun `getTextToSendOrElse BYOK result does not equal custom reply text`() {
         val prefsInstance = PreferencesManager.getPreferencesInstance(context)
-        prefsInstance.setEnableAutomaticAiReplies(true)
+        prefsInstance.setEnableByokReplies(true)
         val instance = CustomRepliesData.getInstance(context)
         instance.set("My very specific custom reply 12345")
         val aiResult = instance.getTextToSendOrElse()
-        // When AI is enabled, should return AI default message, not the stored custom reply
+        // When BYOK AI is enabled, should return AI default message, not the stored custom reply
         assertFalse(aiResult == "My very specific custom reply 12345")
     }
 

@@ -1,49 +1,60 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Theme Colors -->
-    <color name="primary">#0d80f2</color>
-    <color name="primary_dark">#005cb2</color>
-    <color name="primary_variant">#1976D2</color>
+    <!-- Classic Minimal Brand Palette -->
+    <color name="primary">#1E4E68</color>
+    <color name="primary_dark">#143648</color>
+    <color name="primary_variant">#2A6485</color>
 
     <!-- Common Colors -->
     <color name="white">#FFFFFF</color>
     <color name="black">#000000</color>
 
     <!-- Text Colors -->
-    <color name="text_primary">#111418</color>
-    <color name="text_secondary">#60758a</color>
-    <color name="unselected_item_text">#bac4cf</color>
+    <color name="text_primary">#14181F</color>
+    <color name="text_secondary">#5B6678</color>
+    <color name="unselected_item_text">#9AA5B4</color>
 
-    <!-- Background & Surface -->
-    <color name="search_background">#F5F5F5</color>
-    <color name="search_stroke_color">#E0E0E0</color>
+    <!-- Canvas & Surface -->
+    <color name="app_canvas_bg">#F7F8FA</color>
+    <color name="search_background">#FFFFFF</color>
+    <color name="search_stroke_color">#E4E7EC</color>
 
     <!-- Icon Colors -->
-    <color name="search_icon_color">#9E9E9E</color>
+    <color name="search_icon_color">#7B8798</color>
+    <color name="icon_circle_primary_bg">#EBF2F7</color>
+    <color name="icon_circle_green_bg">#EAF5EE</color>
 
     <!-- Option Selection Colors -->
-    <color name="selected_option_background">#E3F2FD</color>
-    <color name="unselected_option_background">#F5F5F5</color>
+    <color name="selected_option_background">#EAF2F8</color>
+    <color name="unselected_option_background">#F4F6F8</color>
 
     <!-- Home Screen Auto Reply Text (light) -->
     <color name="gradient_start">#33FFFFFF</color>
     <color name="gradient_end">#E6FFFFFF</color>
 
     <!-- AI Icon Colors -->
-    <color name="ai_blue">#2196F3</color>
-    <color name="ai_green">#4CAF50</color>
+    <color name="ai_blue">#1E4E68</color>
+    <color name="ai_green">#1F7A4C</color>
 
     <!-- Card Colors -->
-    <color name="card_stroke_default">#5B5B5B</color>
+    <color name="card_stroke_default">#DCE1E8</color>
 
-    <!-- Multi-Rule Auto Responder Colors -->
-    <color name="rule_card_stroke">#E0E4EA</color>
+    <!-- Multi-Rule & History Minimal Classic Colors -->
+    <color name="rule_card_stroke">#E4E7EC</color>
     <color name="rule_card_bg">#FFFFFF</color>
-    <color name="rule_reply_box_bg">#F2F6FC</color>
-    <color name="rule_stat_total_bg">#EDF2FF</color>
-    <color name="rule_stat_active_bg">#E8F5E9</color>
-    <color name="rule_stat_inactive_bg">#F3F4F6</color>
-    <color name="rule_active_accent">#1B873F</color>
-    <color name="rule_inactive_accent">#6B7280</color>
-    <color name="rule_danger">#D32F2F</color>
+    <color name="rule_reply_box_bg">#F3F6F9</color>
+    <color name="rule_stat_total_bg">#EDF3F7</color>
+    <color name="rule_stat_active_bg">#ECF7F0</color>
+    <color name="rule_stat_inactive_bg">#F1F3F6</color>
+    <color name="rule_active_accent">#187946</color>
+    <color name="rule_inactive_accent">#647082</color>
+    <color name="rule_danger">#C63636</color>
+
+    <!-- Soft Classic Badges -->
+    <color name="badge_active_bg">#E6F4EC</color>
+    <color name="badge_active_text">#156E3E</color>
+    <color name="badge_gray_bg">#EEF1F5</color>
+    <color name="badge_gray_text">#4F5B6D</color>
+    <color name="badge_category_bg">#EAF1F6</color>
+    <color name="badge_category_text">#1E4E68</color>
 </resources>

@@ -8,7 +8,9 @@
 
     <com.google.android.material.appbar.AppBarLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        android:layout_height="wrap_content"
+        android:background="@color/app_canvas_bg"
+        app:elevation="0dp">
 
         <com.google.android.material.appbar.MaterialToolbar
             android:id="@+id/toolbar"
@@ -16,9 +18,9 @@
             android:layout_height="?attr/actionBarSize"
             app:navigationIcon="@drawable/ic_arrow_back"
             app:navigationIconTint="?attr/colorOnSurface"
-            app:titleTextColor="?attr/colorOnSurface"
+            app:title="@string/ai_provider_llm"
             app:titleCentered="true"
-            app:title="AI Configuration"
+            app:titleTextColor="?attr/colorOnSurface"
             app:menu="@menu/menu_other_ai_config" />
 
     </com.google.android.material.appbar.AppBarLayout>
@@ -33,162 +35,225 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:paddingHorizontal="16dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="24dp">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:fontFamily="@font/inter_bold"
                 android:text="LLM Settings"
-                android:textAppearance="@style/TextAppearance.MaterialComponents.Headline5"
-                android:textStyle="bold"
-                android:textColor="?android:textColorPrimary"
+                android:textColor="@color/text_primary"
+                android:textSize="20sp"
                 android:layout_marginBottom="4dp" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Configure the AI model for your auto-replies."
-                android:textAppearance="@style/TextAppearance.MaterialComponents.Body2"
-                android:textColor="?android:textColorSecondary"
-                android:layout_marginBottom="24dp" />
-
-            <!-- LLM Provider -->
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="LLM Provider"
-                android:textAppearance="@style/TextAppearance.MaterialComponents.Subtitle2"
-                android:textColor="?android:textColorPrimary"
-                android:layout_marginBottom="8dp" />
-
-            <com.google.android.material.textfield.TextInputLayout
-                android:id="@+id/llmProviderInputLayout"
-                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp">
-
-                <AutoCompleteTextView
-                    android:id="@+id/llmProviderAutoCompleteTextView"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="none"
-                    android:text="OpenAI" />
-            </com.google.android.material.textfield.TextInputLayout>
-
-            <!-- Base URL (Visible only for Custom) -->
-            <com.google.android.material.textfield.TextInputLayout
-                android:id="@+id/baseUrlInputLayout"
-                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:visibility="gone"
-                android:layout_marginBottom="16dp">
-
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/baseUrlEditText"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="textUri"
-                    android:hint="https://api.example.com/v1/" />
-            </com.google.android.material.textfield.TextInputLayout>
-
-            <!-- API Key -->
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="API Key"
-                android:textAppearance="@style/TextAppearance.MaterialComponents.Subtitle2"
-                android:textColor="?android:textColorPrimary"
-                android:layout_marginBottom="8dp" />
-
-            <com.google.android.material.textfield.TextInputLayout
-                android:id="@+id/apiKeyInputLayout"
-                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                app:endIconMode="password_toggle"
-                android:layout_marginBottom="4dp">
-
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/apiKeyEditText"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="textPassword"
-                    android:hint="sk-..." />
-            </com.google.android.material.textfield.TextInputLayout>
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Your API key is stored securely on your device."
-                android:textAppearance="@style/TextAppearance.MaterialComponents.Caption"
-                android:textColor="?android:textColorSecondary"
+                android:fontFamily="@font/noto_sans"
+                android:text="Configure your own API credentials and preferred AI model."
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
                 android:layout_marginBottom="16dp" />
 
-            <!-- Model -->
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Model"
-                android:textAppearance="@style/TextAppearance.MaterialComponents.Subtitle2"
-                android:textColor="?android:textColorPrimary"
-                android:layout_marginBottom="8dp" />
-
-            <com.google.android.material.textfield.TextInputLayout
-                android:id="@+id/modelInputLayout"
-                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp">
+                app:cardBackgroundColor="@color/rule_card_bg"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp"
+                app:strokeColor="@color/rule_card_stroke"
+                app:strokeWidth="1dp">
 
-                <AutoCompleteTextView
-                    android:id="@+id/modelAutoCompleteTextView"
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:inputType="none"
-                    android:hint="Select a model" />
-            </com.google.android.material.textfield.TextInputLayout>
+                    android:orientation="vertical"
+                    android:padding="16dp">
 
-            <!-- System Prompt -->
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="System Prompt"
-                android:textAppearance="@style/TextAppearance.MaterialComponents.Subtitle2"
-                android:textColor="?android:textColorPrimary"
-                android:layout_marginBottom="8dp" />
+                    <!-- LLM Provider -->
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/inter_medium"
+                        android:text="LLM Provider"
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp"
+                        android:layout_marginBottom="6dp" />
 
-            <com.google.android.material.textfield.TextInputLayout
-                android:id="@+id/systemPromptInputLayout"
-                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="24dp">
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/llmProviderInputLayout"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="14dp">
 
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/systemPromptEditText"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="textMultiLine"
-                    android:minLines="3"
-                    android:gravity="top"
-                    android:text="You are a friendly and professional assistant. Your primary goal is to provide concise and helpful auto-replies." />
-            </com.google.android.material.textfield.TextInputLayout>
+                        <AutoCompleteTextView
+                            android:id="@+id/llmProviderAutoCompleteTextView"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="none"
+                            android:text="OpenAI" />
+                    </com.google.android.material.textfield.TextInputLayout>
 
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1" />
+                    <!-- Base URL (Visible only for Custom) -->
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/baseUrlInputLayout"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:visibility="gone"
+                        android:layout_marginBottom="14dp"
+                        android:hint="Base URL (e.g. https://api.example.com/v1)">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/baseUrlEditText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="textUri"
+                            android:maxLines="1" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <!-- API Key -->
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/inter_medium"
+                        android:text="API Key"
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp"
+                        android:layout_marginBottom="6dp" />
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/apiKeyInputLayout"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        app:endIconMode="password_toggle"
+                        android:layout_marginBottom="4dp">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/apiKeyEditText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="textPassword"
+                            android:maxLines="1"
+                            android:hint="sk-... or AIza..." />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/noto_sans"
+                        android:text="Your API key is stored securely on your device."
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp"
+                        android:layout_marginBottom="16dp" />
+
+                    <!-- Model Header + Refresh -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:layout_marginBottom="6dp">
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:fontFamily="@font/inter_medium"
+                            android:text="Model"
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp" />
+
+                        <ProgressBar
+                            android:id="@+id/pb_model_fetch"
+                            style="?android:attr/progressBarStyleSmall"
+                            android:layout_width="18dp"
+                            android:layout_height="18dp"
+                            android:layout_marginEnd="6dp"
+                            android:visibility="gone" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btn_refresh_models"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:minHeight="36dp"
+                            android:paddingHorizontal="10dp"
+                            android:text="Refresh"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/modelInputLayout"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="4dp">
+
+                        <AutoCompleteTextView
+                            android:id="@+id/modelAutoCompleteTextView"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:completionThreshold="0"
+                            android:hint="Select or type a model"
+                            android:imeOptions="actionNext"
+                            android:inputType="textNoSuggestions"
+                            android:maxLines="1" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <TextView
+                        android:id="@+id/tv_model_fetch_status"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="16dp"
+                        android:fontFamily="@font/noto_sans"
+                        android:text="@string/ai_models_enter_key_hint"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp" />
+
+                    <!-- System Prompt -->
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/inter_medium"
+                        android:text="System Prompt"
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp"
+                        android:layout_marginBottom="6dp" />
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/systemPromptInputLayout"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/systemPromptEditText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="top"
+                            android:inputType="textMultiLine"
+                            android:minLines="3"
+                            android:text="You are a friendly and professional assistant. Your primary goal is to provide concise and helpful auto-replies." />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
 
             <!-- Save Button -->
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/saveConfigBtn"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="54dp"
+                android:layout_marginTop="20dp"
+                android:fontFamily="@font/inter_bold"
                 android:text="Save Configuration"
-                android:padding="12dp"
-                android:layout_marginBottom="16dp" />
+                android:textSize="15sp"
+                app:cornerRadius="14dp" />
 
         </LinearLayout>
     </ScrollView>

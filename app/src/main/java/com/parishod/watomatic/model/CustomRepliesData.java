@@ -141,18 +141,11 @@ public class CustomRepliesData {
         }
 
         String currentText;
-        // Check if AI is enabled (covers both Automatic AI and BYOK)
-        if (preferencesManager.isAnyAiRepliesEnabled()) {
+        // Check if BYOK AI is enabled
+        if (preferencesManager.isByokRepliesEnabled()) {
             currentText = aiDefaultMessage;
         } else {
             currentText = getOrElse(regularDefaultMessage);
-        }
-        if (preferencesManager.isAppendWatomaticAttributionEnabled()) {
-            try {
-                currentText += "\n\n" + RTL_ALIGN_INVISIBLE_CHAR + thisAppContext.getString(R.string.sent_using_Watomatic);
-            } catch (android.content.res.Resources.NotFoundException e) {
-                currentText += "\n\n" + RTL_ALIGN_INVISIBLE_CHAR + "Sent using Watomatic";
-            }
         }
         return currentText;
     }

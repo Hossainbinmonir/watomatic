@@ -9,26 +9,31 @@ import android.text.TextWatcher
 import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
+import android.view.MotionEvent
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
+import android.widget.Filter
+import android.widget.ProgressBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
+import com.google.gson.JsonElement
 import com.parishod.watomatic.R
 import com.parishod.watomatic.model.preferences.PreferencesManager
 import com.parishod.watomatic.model.utils.Constants
 import com.parishod.watomatic.model.utils.Constants.CUSTOM_AI_PROVIDER_NAME
 import com.parishod.watomatic.model.utils.UrlValidator
 import com.parishod.watomatic.network.OpenAIService
-import com.parishod.watomatic.utils.UnsavedChangesDialog
 import com.parishod.watomatic.network.RetrofitInstance
 import com.parishod.watomatic.network.model.openai.OpenAIModelsResponse
+import com.parishod.watomatic.utils.UnsavedChangesDialog
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
-
 
 class OtherAiConfigurationActivity : AppCompatActivity() {
 
@@ -38,6 +43,9 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
     private lateinit var baseUrlLayout: TextInputLayout
     private lateinit var modelInput: AutoCompleteTextView
     private lateinit var systemPromptInput: TextInputEditText
+    private lateinit var modelFetchProgress: ProgressBar
+    private lateinit var modelFetchStatus: TextView
+    private lateinit var btnRefreshModels: View
 
     private val providers = listOf("OpenAI", "Claude", "Grok", "Gemini", "DeepSeek", "Mistral", CUSTOM_AI_PROVIDER_NAME)
     private val providerUrls = Constants.PROVIDER_URLS
@@ -48,9 +56,32 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
     private val fetchHandler = Handler(Looper.getMainLooper())
     private var fetchRunnable: Runnable? = null
     private var currentCall: Call<OpenAIModelsResponse>? = null
+    private var currentDynamicCall: Call<JsonElement>? = null
     private var lastFetchedUrl: String? = null
+    private var isPopulating = false
+    private var currentModelsList: List<String> = emptyList()
+
     private companion object {
         const val FETCH_DEBOUNCE_MS = 500L
+
+        val RECOMMENDED_MODELS: Map<String, List<String>> = mapOf(
+            "OpenAI" to listOf("gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"),
+            "Claude" to listOf(
+                "claude-sonnet-4-20250514",
+                "claude-3-7-sonnet-20250219",
+                "claude-3-5-haiku-20241022",
+                "claude-3-5-sonnet-20241022"
+            ),
+            "Gemini" to listOf(
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+                "gemini-2.0-flash",
+                "gemini-1.5-flash"
+            ),
+            "Grok" to listOf("grok-3", "grok-3-mini", "grok-2-latest"),
+            "DeepSeek" to listOf("deepseek-chat", "deepseek-reasoner"),
+            "Mistral" to listOf("mistral-small-latest", "mistral-large-latest", "open-mistral-nemo")
+        )
     }
 
     // Track initial state for unsaved changes detection
@@ -67,14 +98,11 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         setSupportActionBar(findViewById(R.id.toolbar))
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
-        // Setup back button handler for unsaved changes
         onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                // Check if configuration has changed
                 if (hasUnsavedChanges()) {
                     showUnsavedChangesDialog()
                 } else {
-                    // Default behavior - remove callback and trigger back
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
                 }
@@ -87,6 +115,9 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         baseUrlLayout = findViewById(R.id.baseUrlInputLayout)
         modelInput = findViewById(R.id.modelAutoCompleteTextView)
         systemPromptInput = findViewById(R.id.systemPromptEditText)
+        modelFetchProgress = findViewById(R.id.pb_model_fetch)
+        modelFetchStatus = findViewById(R.id.tv_model_fetch_status)
+        btnRefreshModels = findViewById(R.id.btn_refresh_models)
 
         preferencesManager = PreferencesManager.getPreferencesInstance(this)
 
@@ -99,264 +130,325 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         }
     }
 
+    private fun normalizeProviderName(raw: String?): String {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isEmpty()) return providers[0]
+        return providers.firstOrNull { it.equals(trimmed, ignoreCase = true) } ?: trimmed
+    }
+
     private fun prefillData() {
-        val savedProvider = preferencesManager.openApiSource
-        if (!savedProvider.isNullOrEmpty()) {
-            providerInput.setText(savedProvider, false)
-            updateBaseUrlVisibility(savedProvider)
-            initialProvider = savedProvider
-        } else {
-             providerInput.setText(providers[0], false)
-             initialProvider = providers[0]
-        }
+        isPopulating = true
+        val savedProvider = normalizeProviderName(preferencesManager.openApiSource)
+        providerInput.setText(savedProvider, false)
+        updateBaseUrlVisibility(savedProvider)
 
         val savedApiKey = preferencesManager.openAIApiKey
         if (!savedApiKey.isNullOrEmpty()) {
             apiKeyInput.setText(savedApiKey)
-            initialApiKey = savedApiKey
-        } else {
-            initialApiKey = ""
         }
 
         val savedBaseUrl = preferencesManager.customOpenAIApiUrl
         if (!savedBaseUrl.isNullOrEmpty()) {
             baseUrlInput.setText(savedBaseUrl)
-            initialBaseUrl = savedBaseUrl
-        } else {
-            initialBaseUrl = ""
         }
 
         val savedModel = preferencesManager.selectedOpenAIModel
         if (!savedModel.isNullOrEmpty()) {
             modelInput.setText(savedModel, false)
-            initialModel = savedModel
-        } else {
-            initialModel = ""
         }
 
         val savedPrompt = preferencesManager.openAICustomPrompt
         if (!savedPrompt.isNullOrEmpty()) {
             systemPromptInput.setText(savedPrompt)
-            initialSystemPrompt = savedPrompt
-        } else {
-            initialSystemPrompt = ""
         }
 
-        // Capture actual UI state after prefilling (handles XML defaults and preference defaults)
-        // This ensures we compare against what's actually displayed
         initialProvider = providerInput.text.toString()
         initialApiKey = apiKeyInput.text.toString()
         initialBaseUrl = baseUrlInput.text.toString()
         initialModel = modelInput.text.toString()
         initialSystemPrompt = systemPromptInput.text.toString()
 
-        Log.d("OtherAiConfig", "Initial state - Provider: '$initialProvider', ApiKey: '$initialApiKey', BaseUrl: '$initialBaseUrl', Model: '$initialModel', Prompt: '$initialSystemPrompt'")
+        applyRecommendedModels(providerInput.text.toString(), updateHint = true)
+        isPopulating = false
     }
 
     private fun setupProviderDropdown() {
-        val adapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, providers)
+        val adapter = NoFilterArrayAdapter(this, providers)
         providerInput.setAdapter(adapter)
-        
-        // Default to OpenAI if not set (though XML has default text)
         if (providerInput.text.isEmpty()) {
             providerInput.setText(providers[0], false)
         }
     }
 
     private fun setupListeners() {
-        providerInput.setOnItemClickListener { _, _, position, _ ->
-            val selectedProvider = providers[position] // This might be risky if filtered, but inputType=none
-            // Better to get text
+        providerInput.setOnItemClickListener { _, _, _, _ ->
             val provider = providerInput.text.toString()
             updateBaseUrlVisibility(provider)
-            modelInput.text = null // Clear selected model
-            modelInput.setAdapter(null) // Clear adapter
-            fetchModels()
+            lastFetchedUrl = null
+            modelInput.setText("", false)
+            applyRecommendedModels(provider, updateHint = true)
+            fetchModels(openDropdownOnSuccess = false, showErrorToast = false)
         }
-        
-        // Also listen for text changes in case it's set programmatically or otherwise
+
         providerInput.addTextChangedListener(object : TextWatcher {
-             override fun afterTextChanged(s: Editable?) {
-                 updateBaseUrlVisibility(s.toString())
-                 debouncedFetchModels()
-             }
-             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                if (isPopulating) return
+                val provider = s?.toString().orEmpty()
+                updateBaseUrlVisibility(provider)
+                applyRecommendedModels(provider, updateHint = false)
+                debouncedFetchModels()
+            }
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
         })
 
         apiKeyInput.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) {
-                if (!s.isNullOrEmpty()) {
+                if (isPopulating) return
+                lastFetchedUrl = null
+                if (!s.isNullOrBlank()) {
                     debouncedFetchModels()
+                } else {
+                    setStatusMessage(getString(R.string.ai_models_enter_key_hint), isError = false)
                 }
             }
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
         })
 
         baseUrlInput.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) {
+                if (isPopulating) return
+                lastFetchedUrl = null
                 if (providerInput.text.toString() == CUSTOM_AI_PROVIDER_NAME) {
                     debouncedFetchModels()
                 }
             }
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
         })
 
-        modelInput.setOnTouchListener { _, event ->
-            if (event.action == android.view.MotionEvent.ACTION_DOWN) {
-                val provider = providerInput.text.toString()
-                val apiKey = apiKeyInput.text.toString()
+        btnRefreshModels.setOnClickListener {
+            val apiKey = apiKeyInput.text?.toString()?.trim().orEmpty()
+            if (apiKey.isEmpty()) {
+                Toast.makeText(this, "Enter an API key to fetch available models.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            lastFetchedUrl = null
+            fetchModels(openDropdownOnSuccess = true, showErrorToast = true)
+        }
 
-                if (provider.isEmpty()) {
-                    Toast.makeText(this, "Please select an LLM provider first.", Toast.LENGTH_SHORT).show()
-                    return@setOnTouchListener true
-                }
-                if (apiKey.isEmpty()) {
-                    Toast.makeText(this, "Enter an API key to fetch available models.", Toast.LENGTH_SHORT).show()
-                    return@setOnTouchListener true
-                }
-                // If models are not fetched yet, we might want to trigger fetch or check if adapter is empty
-                if (modelInput.adapter == null || modelInput.adapter.count == 0) {
-                     // Try fetching if we have credentials
-                     fetchModels()
-                     // Don't block, but maybe show message if it's taking time?
-                     // For now, let it proceed, fetchModels will populate adapter.
-                     // If adapter is empty, it will show empty dropdown.
-                }
+        modelInput.setOnClickListener {
+            handleModelDropdownInteraction()
+        }
+
+        modelInput.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_UP) {
+                handleModelDropdownInteraction()
             }
             false
         }
     }
 
-    private fun updateBaseUrlVisibility(provider: String) {
-        if (provider == CUSTOM_AI_PROVIDER_NAME) {
-            baseUrlLayout.visibility = View.VISIBLE
-        } else {
-            baseUrlLayout.visibility = View.GONE
-        }
-    }
+    private fun handleModelDropdownInteraction() {
+        val provider = normalizeProviderName(providerInput.text?.toString())
+        val apiKey = apiKeyInput.text?.toString()?.trim().orEmpty()
 
-    /**
-     * Validates that the given URL is well-formed and uses http or https scheme.
-     * Delegates to [UrlValidator] for testability.
-     */
-    private fun isValidUrl(url: String): Boolean = UrlValidator.isValidUrl(url)
-
-    /**
-     * Schedules a debounced fetchModels call. Cancels any pending debounce
-     * and any in-flight network request.
-     */
-    private fun debouncedFetchModels() {
-        // Cancel pending debounce
-        fetchRunnable?.let { fetchHandler.removeCallbacks(it) }
-        fetchRunnable = Runnable { fetchModels() }
-        fetchHandler.postDelayed(fetchRunnable!!, FETCH_DEBOUNCE_MS)
-    }
-
-    private fun fetchModels() {
-        val provider = providerInput.text.toString()
-        val apiKey = apiKeyInput.text.toString()
-
-        if (apiKey.isEmpty()) return
-
-        val baseUrl = if (provider == CUSTOM_AI_PROVIDER_NAME) {
-            baseUrlInput.text.toString()
-        } else {
-            providerUrls[provider]
-        }
-
-        if (baseUrl.isNullOrEmpty()) return
-
-        // Validate URL before making any network call
-        if (!isValidUrl(baseUrl)) {
-            Log.d("OtherAiConfig", "Skipping fetch — invalid URL: $baseUrl")
+        if (provider.isEmpty()) {
+            Toast.makeText(this, "Please select an LLM provider first.", Toast.LENGTH_SHORT).show()
             return
         }
 
-        // Skip if URL hasn't changed since last successful fetch
-        val fetchKey = "$baseUrl|$apiKey"
+        if (currentModelsList.isEmpty()) {
+            applyRecommendedModels(provider, updateHint = false)
+        }
+
+        if (currentModelsList.isNotEmpty()) {
+            modelInput.post {
+                if (!isFinishing && !isDestroyed) {
+                    modelInput.showDropDown()
+                }
+            }
+        }
+
+        if (apiKey.isNotEmpty() && lastFetchedUrl == null) {
+            fetchModels(openDropdownOnSuccess = true, showErrorToast = false)
+        }
+    }
+
+    private fun applyRecommendedModels(provider: String, updateHint: Boolean) {
+        val normalized = normalizeProviderName(provider)
+        val recommended = RECOMMENDED_MODELS[normalized].orEmpty()
+        if (recommended.isNotEmpty()) {
+            updateModelDropdown(recommended)
+            if (updateHint && apiKeyInput.text.isNullOrBlank()) {
+                setStatusMessage(getString(R.string.ai_models_enter_key_hint), isError = false)
+            }
+        } else {
+            updateModelDropdown(emptyList())
+        }
+    }
+
+    private fun updateBaseUrlVisibility(provider: String) {
+        baseUrlLayout.visibility = if (provider == CUSTOM_AI_PROVIDER_NAME) View.VISIBLE else View.GONE
+    }
+
+    private fun isValidUrl(url: String): Boolean = UrlValidator.isValidUrl(url)
+
+    private fun debouncedFetchModels() {
+        fetchRunnable?.let { fetchHandler.removeCallbacks(it) }
+        fetchRunnable = Runnable { fetchModels(openDropdownOnSuccess = false, showErrorToast = false) }
+        fetchHandler.postDelayed(fetchRunnable!!, FETCH_DEBOUNCE_MS)
+    }
+
+    private fun fetchModels(openDropdownOnSuccess: Boolean = false, showErrorToast: Boolean = false) {
+        val provider = normalizeProviderName(providerInput.text?.toString())
+        val apiKey = apiKeyInput.text?.toString()?.trim().orEmpty()
+
+        if (apiKey.isEmpty()) return
+
+        val rawBaseUrl = if (provider == CUSTOM_AI_PROVIDER_NAME) {
+            baseUrlInput.text?.toString()?.trim().orEmpty()
+        } else {
+            providerUrls[provider].orEmpty()
+        }
+
+        if (rawBaseUrl.isEmpty()) return
+        if (!isValidUrl(rawBaseUrl)) {
+            Log.d("OtherAiConfig", "Skipping fetch — invalid URL: $rawBaseUrl")
+            return
+        }
+
+        val fetchKey = "$rawBaseUrl|$apiKey"
         if (fetchKey == lastFetchedUrl) return
 
-        // Cancel any in-flight request
         currentCall?.cancel()
+        currentDynamicCall?.cancel()
 
-        // Create Retrofit instance safely
+        val normalizedBaseUrl = if (rawBaseUrl.endsWith("/")) rawBaseUrl else "$rawBaseUrl/"
+        val modelsEndpointUrl = buildModelsEndpointUrl(provider, normalizedBaseUrl)
+
         val retrofit = try {
-            RetrofitInstance.getOpenAIRetrofitInstance(baseUrl)
+            RetrofitInstance.getOpenAIRetrofitInstance(normalizedBaseUrl)
         } catch (e: IllegalArgumentException) {
-            Log.e("OtherAiConfig", "Invalid base URL for Retrofit: $baseUrl", e)
+            Log.e("OtherAiConfig", "Invalid base URL for Retrofit: $normalizedBaseUrl", e)
             return
         }
         val service = retrofit.create(OpenAIService::class.java)
 
         val headers = HashMap<String, String>()
-        if (provider == "Claude") {
-            headers["x-api-key"] = apiKey
-            headers["anthropic-version"] = "2023-06-01"
-        } else {
-            headers["Authorization"] = "Bearer $apiKey"
+        when (provider) {
+            "Claude" -> {
+                headers["x-api-key"] = apiKey
+                headers["anthropic-version"] = "2023-06-01"
+            }
+            "Gemini" -> {
+                headers["x-goog-api-key"] = apiKey
+            }
+            else -> {
+                headers["Authorization"] = "Bearer $apiKey"
+            }
         }
 
-        val call = service.getModels(headers)
-        currentCall = call
+        setLoadingState(true)
 
-        call.enqueue(object : Callback<OpenAIModelsResponse> {
-            override fun onResponse(call: Call<OpenAIModelsResponse>, response: Response<OpenAIModelsResponse>) {
-                if (call.isCanceled) return
+        val call = service.getModelsDynamic(modelsEndpointUrl, headers)
+        currentDynamicCall = call
+
+        call.enqueue(object : Callback<JsonElement> {
+            override fun onResponse(call: Call<JsonElement>, response: Response<JsonElement>) {
+                if (call.isCanceled || isFinishing || isDestroyed) return
+                setLoadingState(false)
+
                 if (response.isSuccessful && response.body() != null) {
-                    lastFetchedUrl = fetchKey
-                    val models = response.body()!!.data.map { it.id }
-                    updateModelDropdown(models)
-                } else {
-                    Log.e("OtherAiConfig", "Error fetching models: ${response.code()}")
-                    Toast.makeText(this@OtherAiConfigurationActivity, "Error fetching models: ${response.code()}", Toast.LENGTH_SHORT).show()
+                    val fetched = parseModelsResponse(provider, response.body()!!)
+                    if (fetched.isNotEmpty()) {
+                        lastFetchedUrl = fetchKey
+                        val recommended = RECOMMENDED_MODELS[provider].orEmpty()
+                        val merged = (fetched + recommended).distinct()
+                        updateModelDropdown(merged)
+                        setStatusMessage(
+                            getString(R.string.ai_models_loaded, fetched.size, provider),
+                            isError = false
+                        )
+                        if (openDropdownOnSuccess && modelInput.hasFocus()) {
+                            modelInput.showDropDown()
+                        }
+                        return
+                    }
                 }
+
+                val codeMsg = if (!response.isSuccessful) "HTTP ${response.code()}" else "Empty list"
+                Log.w("OtherAiConfig", "Model fetch fallback ($provider): $codeMsg")
+                handleModelFetchFallback(provider, codeMsg, showErrorToast)
             }
 
-            override fun onFailure(call: Call<OpenAIModelsResponse>, t: Throwable) {
-                if (call.isCanceled) return
-                Log.e("OtherAiConfig", "Failed to fetch models", t)
-                Toast.makeText(this@OtherAiConfigurationActivity, "Failed to fetch models: ${t.message}", Toast.LENGTH_SHORT).show()
+            override fun onFailure(call: Call<JsonElement>, t: Throwable) {
+                if (call.isCanceled || isFinishing || isDestroyed) return
+                setLoadingState(false)
+                val reason = t.localizedMessage ?: "Network error"
+                Log.w("OtherAiConfig", "Failed to fetch models ($provider): $reason", t)
+                handleModelFetchFallback(provider, reason, showErrorToast)
             }
         })
     }
 
-    private fun updateModelDropdown(models: List<String>) {
-        val adapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, models)
-        modelInput.setAdapter(adapter)
-        if (models.isNotEmpty()) {
-             // If current selection is not in list, maybe clear it?
-             // For now, let user select.
+    private fun handleModelFetchFallback(provider: String, reason: String, showToast: Boolean) {
+        val recommended = RECOMMENDED_MODELS[provider].orEmpty()
+        if (recommended.isNotEmpty()) {
+            updateModelDropdown(recommended)
+            setStatusMessage(getString(R.string.ai_models_fallback_notice, reason), isError = true)
+        } else {
+            setStatusMessage("Could not fetch models ($reason). Type a model ID manually.", isError = true)
+        }
+        if (showToast) {
+            Toast.makeText(this, "Fetch failed ($reason). Using recommended/manual entry.", Toast.LENGTH_SHORT).show()
         }
     }
 
+    private fun setLoadingState(loading: Boolean) {
+        modelFetchProgress.visibility = if (loading) View.VISIBLE else View.GONE
+        btnRefreshModels.isEnabled = !loading
+        if (loading) {
+            setStatusMessage(getString(R.string.ai_models_fetching), isError = false)
+        }
+    }
+
+    private fun setStatusMessage(message: String, isError: Boolean) {
+        modelFetchStatus.text = message
+        val colorRes = if (isError) R.color.rule_danger else R.color.text_secondary
+        modelFetchStatus.setTextColor(ContextCompat.getColor(this, colorRes))
+    }
+
+    private fun updateModelDropdown(models: List<String>) {
+        currentModelsList = models
+        val adapter = NoFilterArrayAdapter(this, models)
+        modelInput.setAdapter(adapter)
+    }
+
     private fun saveConfiguration() {
-        val provider = providerInput.text.toString()
-        val apiKey = apiKeyInput.text.toString()
-        val model = modelInput.text.toString()
+        val provider = providerInput.text.toString().trim()
+        val apiKey = apiKeyInput.text.toString().trim()
+        val model = modelInput.text.toString().trim()
 
         if (apiKey.isEmpty()) {
             Toast.makeText(this, "API key cannot be empty", Toast.LENGTH_SHORT).show()
             return
         }
         if (model.isEmpty()) {
-            Toast.makeText(this, "Select a model", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Select or enter a model", Toast.LENGTH_SHORT).show()
             return
         }
 
-        // Return result
         val resultIntent = Intent()
         resultIntent.putExtra("provider", provider)
         resultIntent.putExtra("apiKey", apiKey)
         resultIntent.putExtra("model", model)
-        resultIntent.putExtra("systemPrompt", systemPromptInput.text.toString())
+        resultIntent.putExtra("systemPrompt", systemPromptInput.text.toString().trim())
         if (provider == CUSTOM_AI_PROVIDER_NAME) {
-            resultIntent.putExtra("baseUrl", baseUrlInput.text.toString())
+            resultIntent.putExtra("baseUrl", baseUrlInput.text.toString().trim())
         }
 
-        // Update initial state to prevent unsaved changes dialog
         initialProvider = provider
         initialApiKey = apiKey
         initialModel = model
@@ -367,9 +459,6 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         finish()
     }
 
-    /**
-     * Check if the current configuration has changed from the initial state
-     */
     private fun hasUnsavedChanges(): Boolean {
         val currentProvider = providerInput.text.toString()
         val currentApiKey = apiKeyInput.text.toString()
@@ -377,33 +466,17 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         val currentModel = modelInput.text.toString()
         val currentSystemPrompt = systemPromptInput.text.toString()
 
-        val changed = currentProvider != initialProvider ||
-                currentApiKey != initialApiKey ||
-                currentBaseUrl != initialBaseUrl ||
-                currentModel != initialModel ||
-                currentSystemPrompt != initialSystemPrompt
-
-        Log.d("OtherAiConfig", "hasUnsavedChanges: $changed")
-        if (changed) {
-            Log.d("OtherAiConfig", "  Provider: '$currentProvider' vs '$initialProvider' = ${currentProvider != initialProvider}")
-            Log.d("OtherAiConfig", "  ApiKey: '$currentApiKey' vs '$initialApiKey' = ${currentApiKey != initialApiKey}")
-            Log.d("OtherAiConfig", "  BaseUrl: '$currentBaseUrl' vs '$initialBaseUrl' = ${currentBaseUrl != initialBaseUrl}")
-            Log.d("OtherAiConfig", "  Model: '$currentModel' vs '$initialModel' = ${currentModel != initialModel}")
-            Log.d("OtherAiConfig", "  Prompt: '$currentSystemPrompt' vs '$initialSystemPrompt' = ${currentSystemPrompt != initialSystemPrompt}")
-        }
-        return changed
+        return currentProvider != initialProvider ||
+            currentApiKey != initialApiKey ||
+            currentBaseUrl != initialBaseUrl ||
+            currentModel != initialModel ||
+            currentSystemPrompt != initialSystemPrompt
     }
 
-    /**
-     * Show a dialog to confirm discarding unsaved configuration changes
-     */
     private fun showUnsavedChangesDialog() {
         UnsavedChangesDialog.show(
             context = this,
-            onDiscard = {
-                // Navigate back without saving
-                finish()
-            }
+            onDiscard = { finish() }
         )
     }
 
@@ -428,8 +501,118 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Clean up debounce handler and cancel in-flight request
         fetchRunnable?.let { fetchHandler.removeCallbacks(it) }
         currentCall?.cancel()
+        currentDynamicCall?.cancel()
     }
+
+    private class NoFilterArrayAdapter(
+        context: android.content.Context,
+        private val items: List<String>
+    ) : ArrayAdapter<String>(context, android.R.layout.simple_dropdown_item_1line, items) {
+
+        private val noFilter = object : Filter() {
+            override fun performFiltering(constraint: CharSequence?): FilterResults {
+                return FilterResults().apply {
+                    values = items
+                    count = items.size
+                }
+            }
+
+            override fun publishResults(constraint: CharSequence?, results: FilterResults?) {
+                notifyDataSetChanged()
+            }
+        }
+
+        override fun getFilter(): Filter = noFilter
+    }
+
+    internal object ModelUrlAndParser {
+        private val VERSION_SUFFIX_REGEX = Regex(".*/v\\d+[a-z0-9]*/$")
+
+        fun buildModelsEndpointUrl(provider: String, normalizedBaseUrl: String): String {
+            val base = if (normalizedBaseUrl.endsWith("/")) normalizedBaseUrl else "$normalizedBaseUrl/"
+            return if (provider == "Gemini") {
+                if (base.endsWith("/v1beta/") || base.endsWith("/v1/")) {
+                    "${base}models"
+                } else {
+                    "${base}v1beta/models"
+                }
+            } else {
+                if (VERSION_SUFFIX_REGEX.matches(base) || base.endsWith("/openai/") || base.endsWith("/v1beta/openai/")) {
+                    "${base}models"
+                } else {
+                    "${base}v1/models"
+                }
+            }
+        }
+
+        fun parseModelsResponse(provider: String, root: JsonElement): List<String> {
+            val ids = mutableListOf<String>()
+            if (root.isJsonArray) {
+                for (el in root.asJsonArray) {
+                    if (el.isJsonPrimitive) {
+                        ids.add(el.asString)
+                    } else if (el.isJsonObject) {
+                        val obj = el.asJsonObject
+                        val id = obj.get("id")?.takeIf { it.isJsonPrimitive }?.asString
+                            ?: obj.get("name")?.takeIf { it.isJsonPrimitive }?.asString
+                        if (!id.isNullOrBlank()) ids.add(id)
+                    }
+                }
+                return ids.distinct()
+            }
+
+            if (!root.isJsonObject) return emptyList()
+            val obj = root.asJsonObject
+
+            val dataArray = obj.getAsJsonArray("data")
+            if (dataArray != null) {
+                for (el in dataArray) {
+                    if (el.isJsonObject) {
+                        val item = el.asJsonObject
+                        val id = item.get("id")?.takeIf { it.isJsonPrimitive }?.asString
+                            ?: item.get("name")?.takeIf { it.isJsonPrimitive }?.asString
+                        if (!id.isNullOrBlank()) ids.add(id)
+                    }
+                }
+            }
+
+            val modelsArray = obj.getAsJsonArray("models")
+            if (modelsArray != null) {
+                for (el in modelsArray) {
+                    if (el.isJsonObject) {
+                        val item = el.asJsonObject
+                        if (provider == "Gemini") {
+                            val methods = item.getAsJsonArray("supportedGenerationMethods")
+                            if (methods != null && methods.size() > 0) {
+                                val supportsGenContent = methods.any {
+                                    it.isJsonPrimitive && it.asString == "generateContent"
+                                }
+                                if (!supportsGenContent) continue
+                            }
+                        }
+                        val rawName = item.get("name")?.takeIf { it.isJsonPrimitive }?.asString
+                            ?: item.get("id")?.takeIf { it.isJsonPrimitive }?.asString
+                        if (!rawName.isNullOrBlank()) {
+                            val cleanName = if (rawName.startsWith("models/")) {
+                                rawName.removePrefix("models/")
+                            } else {
+                                rawName
+                            }
+                            ids.add(cleanName)
+                        }
+                    }
+                }
+            }
+
+            return ids.distinct()
+        }
+    }
+
+    private fun buildModelsEndpointUrl(provider: String, normalizedBaseUrl: String): String =
+        ModelUrlAndParser.buildModelsEndpointUrl(provider, normalizedBaseUrl)
+
+    private fun parseModelsResponse(provider: String, root: JsonElement): List<String> =
+        ModelUrlAndParser.parseModelsResponse(provider, root)
 }

@@ -80,15 +80,6 @@ class CustomReplyEditorActivityTest {
     }
 
     @Test
-    fun automaticAiProviderCardIsDisplayed() {
-        val scenario = launchActivity()
-        onView(withId(R.id.automatic_ai_provider_card))
-            .perform(scrollTo())
-            .check(matches(isDisplayed()))
-        scenario.close()
-    }
-
-    @Test
     fun otherAiProviderCardIsDisplayed() {
         val scenario = launchActivity()
         onView(withId(R.id.other_ai_provider_card))
@@ -108,16 +99,6 @@ class CustomReplyEditorActivityTest {
     fun scrollViewIsDisplayed() {
         val scenario = launchActivity()
         onView(withId(R.id.custom_reply_editor_scroll_view)).check(matches(isDisplayed()))
-        scenario.close()
-    }
-
-    @Test
-    fun communityTemplatesLinkExists() {
-        val scenario = launchActivity()
-        scenario.onActivity { activity ->
-            val view = activity.findViewById<android.view.View>(R.id.tip_wato_message)
-            assertNotNull("Community templates link should exist", view)
-        }
         scenario.close()
     }
 

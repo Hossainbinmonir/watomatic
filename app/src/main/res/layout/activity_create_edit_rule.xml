@@ -11,7 +11,7 @@
         android:id="@+id/appbar_layout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="?attr/colorSurface"
+        android:background="@color/app_canvas_bg"
         app:elevation="0dp">
 
         <com.google.android.material.appbar.MaterialToolbar
@@ -82,6 +82,32 @@
                             android:maxLines="1" />
                     </com.google.android.material.textfield.TextInputLayout>
 
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/til_rule_category"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:hint="@string/rule_category_label"
+                        app:endIconMode="clear_text"
+                        app:helperText="@string/rule_category_helper">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/et_rule_category"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:hint="@string/rule_category_hint"
+                            android:inputType="textCapWords"
+                            android:maxLines="1" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.chip.ChipGroup
+                        android:id="@+id/chip_group_category_suggestions"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        app:singleSelection="true" />
+
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -100,7 +126,7 @@
                                 android:layout_height="wrap_content"
                                 android:fontFamily="@font/inter_medium"
                                 android:text="@string/rule_enable_label"
-                                android:textColor="?android:attr/textColorPrimary"
+                                android:textColor="@color/text_primary"
                                 android:textSize="15sp" />
 
                             <TextView
@@ -108,7 +134,7 @@
                                 android:layout_height="wrap_content"
                                 android:fontFamily="@font/noto_sans"
                                 android:text="@string/rule_enable_desc"
-                                android:textColor="?android:attr/textColorSecondary"
+                                android:textColor="@color/text_secondary"
                                 android:textSize="12sp" />
                         </LinearLayout>
 

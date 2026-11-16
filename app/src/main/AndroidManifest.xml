@@ -9,9 +9,6 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.READ_NOTIFICATION_CONVERSATIONS" />
 
-    <!-- Billing permission -->
-    <uses-permission android:name="com.android.vending.BILLING" />
-
 
     <!-- Query other apps (needed for Android 11+) -->
     <queries>
@@ -79,11 +76,6 @@
             android:exported="false"
             android:label="@string/donations_activity_title"
             android:parentActivityName=".activity.main.MainActivity" />
-        <activity
-            android:name=".activity.subscription.SubscriptionInfoActivity"
-            android:exported="false"
-            android:label="@string/subscription_info_title"
-            android:parentActivityName=".activity.customreplyeditor.CustomReplyEditorActivity" />
 
         <activity
             android:name=".activity.customreplyeditor.OtherAiConfigurationActivity"
@@ -103,6 +95,12 @@
             android:label="@string/create_rule_title"
             android:parentActivityName=".activity.rules.RuleDashboardActivity"
             android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".activity.history.ReplyHistoryActivity"
+            android:exported="false"
+            android:label="@string/reply_history_title"
+            android:parentActivityName=".activity.main.MainActivity" />
 
         <!-- Notification Listener Service -->
         <service

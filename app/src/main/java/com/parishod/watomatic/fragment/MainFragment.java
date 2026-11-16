@@ -18,7 +18,6 @@ import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -41,21 +40,12 @@ import com.parishod.watomatic.BuildConfig;
 import com.parishod.watomatic.service.NotificationService;
 import com.parishod.watomatic.R;
 import com.parishod.watomatic.activity.about.AboutActivity;
-import com.parishod.watomatic.activity.contactselector.ContactSelectorActivity;
 import com.parishod.watomatic.activity.customreplyeditor.CustomReplyEditorActivity;
-import com.parishod.watomatic.activity.main.MainActivity;
+import com.parishod.watomatic.activity.history.ReplyHistoryActivity;
 import com.parishod.watomatic.activity.rules.RuleDashboardActivity;
 import com.parishod.watomatic.activity.settings.SettingsActivity;
-import com.parishod.watomatic.model.App;
 import com.parishod.watomatic.model.CustomRepliesData;
-import com.parishod.watomatic.model.data.AppItem;
-import com.parishod.watomatic.model.data.CooldownItem;
-import com.parishod.watomatic.model.data.DialogConfig;
-import com.parishod.watomatic.model.data.MessageTypeItem;
-import com.parishod.watomatic.model.enums.DialogType;
-import com.parishod.watomatic.model.interfaces.DialogActionListener;
 import com.parishod.watomatic.model.preferences.PreferencesManager;
-import com.parishod.watomatic.model.rules.AutoReplyRule;
 import com.parishod.watomatic.model.rules.AutoReplyRulesDatabase;
 import com.parishod.watomatic.model.utils.Constants;
 import com.parishod.watomatic.model.utils.CustomDialog;
@@ -77,7 +67,7 @@ import static android.content.Intent.FLAG_ACTIVITY_REQUIRE_NON_BROWSER;
 import static android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS;
 import static com.parishod.watomatic.model.utils.Constants.MIN_REPLIES_TO_ASK_APP_RATING;
 
-public class MainFragment extends Fragment implements DialogActionListener {
+public class MainFragment extends Fragment {
 
     private PreferencesManager preferencesManager;
     private CustomRepliesData customRepliesData;
@@ -90,17 +80,10 @@ public class MainFragment extends Fragment implements DialogActionListener {
     BottomNavigationView bottomNav;
     Button editButton;
     private int gitHubReleaseNotesId = -1;
-    private int selectedCooldownTime = -1;
-    private int initialCooldownTime = -1;
-    private TextView replyCooldownDescription, messageTypeDescription, contactsSelectorDescription;
-    private LinearLayout contactsFilterLL, messagesTypeLL, supportedAppsLL, replyCooldownLL;
-    private TextView enabledAppsCount;
     private TextView multiRuleSummaryText;
+    private TextView replyHistorySummaryText;
+    private TextView homeStatusText;
     private final ExecutorService rulesExecutor = Executors.newSingleThreadExecutor();
-    private final List<String> communityUrls = Arrays.asList("tg://resolve?domain=WatomaticApp",
-            "https://fosstodon.org/@watomatic",
-            "https://twitter.com/watomatic",
-            "https://www.reddit.com/r/watomatic");
 
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
@@ -141,36 +124,10 @@ public class MainFragment extends Fragment implements DialogActionListener {
         autoRepliesSwitch = view.findViewById(R.id.switch_auto_replies);
         editButton = view.findViewById(R.id.btn_edit);
         bottomNav = view.findViewById(R.id.bottom_nav);
+        homeStatusText = view.findViewById(R.id.tv_home_status);
 
         // Setup AI Reply
         aiReplyText.setText(customRepliesData.getTextToSendOrElse());
-
-        //Filters Layout views
-        contactsSelectorDescription = view.findViewById(R.id.contacts_filter_description);
-        contactsFilterLL = view.findViewById(R.id.filter_contacts);
-        contactsFilterLL.setOnClickListener(view -> {
-            startActivity(new Intent(requireActivity(), ContactSelectorActivity.class));
-        });
-
-        messageTypeDescription = view.findViewById(R.id.message_type_desc);
-        messagesTypeLL = view.findViewById(R.id.filter_message_type);
-        messagesTypeLL.setOnClickListener(view -> {
-            showMessageTypeDialog();
-        });
-
-        supportedAppsLL = view.findViewById(R.id.filter_apps);
-        supportedAppsLL.setOnClickListener(view -> {
-            showAppsDialog();
-        });
-
-        enabledAppsCount = view.findViewById(R.id.enabled_apps_count);
-        enabledAppsCount.setText(String.format(getResources().getString(R.string.apps_enabled_count), preferencesManager.getEnabledApps().size(), Constants.SUPPORTED_APPS.size()));
-
-        replyCooldownDescription = view.findViewById(R.id.reply_cooldown_description);
-        replyCooldownLL = view.findViewById(R.id.filter_reply_cooldown);
-        replyCooldownLL.setOnClickListener(view -> {
-            showCooldownDialog();
-        });
 
         // Setup Auto-replies switch
         autoRepliesSwitch.setChecked(preferencesManager.isServiceEnabled());
@@ -203,6 +160,17 @@ public class MainFragment extends Fragment implements DialogActionListener {
             manageRulesBtn.setOnClickListener(v -> openRuleDashboardActivity());
         }
 
+        // Setup Reply History Card
+        replyHistorySummaryText = view.findViewById(R.id.tv_reply_history_summary);
+        View replyHistoryCard = view.findViewById(R.id.card_reply_history);
+        View viewHistoryBtn = view.findViewById(R.id.btn_view_history);
+        if (replyHistoryCard != null) {
+            replyHistoryCard.setOnClickListener(v -> openReplyHistoryActivity());
+        }
+        if (viewHistoryBtn != null) {
+            viewHistoryBtn.setOnClickListener(v -> openReplyHistoryActivity());
+        }
+
         // Setup Bottom Navigation
         bottomNav.setOnNavigationItemSelectedListener(item -> {
             int itemId = item.getItemId();
@@ -211,10 +179,6 @@ public class MainFragment extends Fragment implements DialogActionListener {
                 return true;
             } else if (itemId == R.id.navigation_rules) {
                 openRuleDashboardActivity();
-                return true;
-            } else if (itemId == R.id.navigation_community) {
-                // Handle community navigation
-                launchApp(communityUrls, getString(R.string.watomatic_subreddit_url));
                 return true;
             } else if (itemId == R.id.navigation_settings) {
                 // Handle settings navigation
@@ -264,78 +228,6 @@ public class MainFragment extends Fragment implements DialogActionListener {
         return view;
     }
 
-    private void launchApp(List<String> urls, String fallbackUrl) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            launchAppLegacy(urls, fallbackUrl);
-            return;
-        }
-        boolean isLaunched = false;
-        for (String eachReleaseUrl : urls) {
-            if (isLaunched) {
-                break;
-            }
-            try {
-                // In order for this intent to be invoked, the system must directly launch a non-browser app.
-                // Ref: https://developer.android.com/training/package-visibility/use-cases#avoid-a-disambiguation-dialog
-                Intent intent = new Intent(ACTION_VIEW, Uri.parse(eachReleaseUrl))
-                        .setFlags(FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_REQUIRE_NON_BROWSER |
-                                FLAG_ACTIVITY_REQUIRE_DEFAULT);
-                startActivity(intent);
-                isLaunched = true;
-            } catch (ActivityNotFoundException e) {
-                // This code executes in one of the following cases:
-                // 1. Only browser apps can handle the intent.
-                // 2. The user has set a browser app as the default app.
-                // 3. The user hasn't set any app as the default for handling this URL.
-                isLaunched = false;
-            }
-        }
-        if (!isLaunched) { // Open Github latest release url in browser if everything else fails
-            startActivity(new Intent(ACTION_VIEW).setData(Uri.parse(fallbackUrl)));
-        }
-    }
-
-    private void launchAppLegacy(List<String> urls, String fallbackUrl) {
-        boolean isLaunched = false;
-        for (String url : urls) {
-            Intent intent = new Intent(ACTION_VIEW, Uri.parse(url));
-            List<ResolveInfo> list = getActivity() != null ?
-                    getActivity().getPackageManager().queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY) :
-                    null;
-            List<ResolveInfo> possibleBrowserIntents = getActivity() != null ?
-                    getActivity().getPackageManager()
-                            .queryIntentActivities(new Intent(ACTION_VIEW, Uri.parse("http://www.deekshith.in/")), PackageManager.MATCH_DEFAULT_ONLY) :
-                    null;
-
-            Set<String> excludeIntents = new HashSet<>();
-            if (possibleBrowserIntents != null) {
-                for (ResolveInfo eachPossibleBrowserIntent : possibleBrowserIntents) {
-                    excludeIntents.add(eachPossibleBrowserIntent.activityInfo.name);
-                }
-            }
-
-            //Check for non browser application
-            if (list != null) {
-                for (ResolveInfo resolveInfo : list) {
-                    if (!excludeIntents.contains(resolveInfo.activityInfo.name)) {
-                        intent.setPackage(resolveInfo.activityInfo.packageName);
-                        startActivity(intent);
-                        isLaunched = true;
-                        break;
-                    }
-                }
-            }
-
-            if (isLaunched) {
-                break;
-            }
-        }
-        if (!isLaunched) { // Open Github latest release url in browser if everything else fails
-            startActivity(new Intent(ACTION_VIEW).setData(Uri.parse(fallbackUrl)));
-        }
-    }
-
-
     private void checkNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS);
@@ -377,15 +269,17 @@ public class MainFragment extends Fragment implements DialogActionListener {
         // Set user auto reply text
         aiReplyText.setText(customRepliesData.getTextToSendOrElse());
 
-        updateContactsSelectorState();
-        updateMessageType();
-        updateCooldownFilterDisplay();
         updateMultiRuleSummary();
+        updateReplyHistorySummary();
         showAppRatingPopup();
     }
 
     private void openRuleDashboardActivity() {
         startActivity(new Intent(requireActivity(), RuleDashboardActivity.class));
+    }
+
+    private void openReplyHistoryActivity() {
+        startActivity(new Intent(requireActivity(), ReplyHistoryActivity.class));
     }
 
     private void updateMultiRuleSummary() {
@@ -414,53 +308,38 @@ public class MainFragment extends Fragment implements DialogActionListener {
         });
     }
 
+    private void updateReplyHistorySummary() {
+        if (replyHistorySummaryText == null || getContext() == null) {
+            return;
+        }
+        final Context appContext = requireContext().getApplicationContext();
+        rulesExecutor.execute(() -> {
+            try {
+                DbUtils utils = new DbUtils(appContext);
+                long totalReplies = utils.getNumReplies();
+                int uniquePairs = utils.getUniqueReplyPairCount();
+                if (isAdded() && replyHistorySummaryText != null) {
+                    replyHistorySummaryText.post(() -> {
+                        if (!isAdded()) return;
+                        if (totalReplies == 0L) {
+                            replyHistorySummaryText.setText(R.string.reply_history_summary_empty);
+                        } else {
+                            replyHistorySummaryText.setText(
+                                    getString(R.string.reply_history_summary_counts, totalReplies, uniquePairs)
+                            );
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                Log.w("MainFragment", "Failed to load reply history summary", e);
+            }
+        });
+    }
+
     @Override
     public void onDestroy() {
         super.onDestroy();
         rulesExecutor.shutdown();
-    }
-
-    private void updateContactsSelectorState(){
-        boolean enabled = preferencesManager.isContactReplyEnabled();
-        if(!enabled){
-            contactsSelectorDescription.setText(R.string.contact_filter_disabled);
-            return;
-        }
-        int count = preferencesManager.getReplyToNames().size() + preferencesManager.getCustomReplyNames().size();
-        boolean isBlacklist = preferencesManager.isContactReplyBlacklistMode();
-        if(isBlacklist){
-            contactsSelectorDescription.setText(getString(R.string.contact_filter_enabled_blacklist, count));
-        }else{
-            contactsSelectorDescription.setText(getString(R.string.contact_filter_enabled_whitelist, count));
-        }
-    }
-
-    private void updateMessageType(){
-        if(preferencesManager.isGroupReplyEnabled()){
-            messageTypeDescription.setText(R.string.all_messages);
-        }else{
-            messageTypeDescription.setText(R.string.direct_messages);
-        }
-    }
-
-    private void updateCooldownFilterDisplay() {
-        long cooldownInMillis = preferencesManager.getAutoReplyDelay();
-        long minutes = cooldownInMillis / (60 * 1000);
-        if (minutes == 0) {
-            replyCooldownDescription.setText(R.string.no_cooldown);
-            return;
-        }
-        long hours = minutes / 60;
-        minutes = minutes % 60;
-
-        StringBuilder cooldownText = new StringBuilder();
-        if (hours > 0) {
-            cooldownText.append(hours).append(" ").append(getResources().getString(hours > 1 ? R.string.hours : R.string.hour)).append(" ");
-        }
-        if (minutes > 0) {
-            cooldownText.append(minutes).append(" ").append(getResources().getString(minutes > 1 ? R.string.minutes : R.string.minute));
-        }
-        replyCooldownDescription.setText(cooldownText.toString().trim());
     }
 
     private void showAppRatingPopup() {
@@ -606,7 +485,13 @@ public class MainFragment extends Fragment implements DialogActionListener {
     }
 
     private void setSwitchState() {
-        autoRepliesSwitch.setChecked(preferencesManager.isServiceEnabled());
+        boolean isEnabled = preferencesManager.isServiceEnabled();
+        autoRepliesSwitch.setChecked(isEnabled);
+        if (homeStatusText != null && getContext() != null) {
+            homeStatusText.setText(isEnabled ? R.string.home_active_status : R.string.home_paused_status);
+            int colorRes = isEnabled ? R.color.rule_active_accent : R.color.text_secondary;
+            homeStatusText.setTextColor(ContextCompat.getColor(requireContext(), colorRes));
+        }
     }
 
     //https://stackoverflow.com/questions/20141727/check-if-user-has-granted-notificationlistener-access-to-my-app/28160115
@@ -688,152 +573,5 @@ public class MainFragment extends Fragment implements DialogActionListener {
     private void loadSettingsActivity() {
         Intent intent = new Intent(requireActivity(), SettingsActivity.class);
         requireActivity().startActivity(intent);
-    }
-
-    // Dialog 1: Apps with toggles and search
-    private void showAppsDialog() {
-
-        Set<App> supportedApps = Constants.SUPPORTED_APPS;
-        List<com.parishod.watomatic.model.data.DialogListItem> dialogItems = new ArrayList<>();
-        List<AppItem> regularApps = new ArrayList<>();
-        List<AppItem> experimentalApps = new ArrayList<>();
-
-        // Separate apps into regular and experimental
-        for (App app : supportedApps) {
-            AppItem item = new AppItem(
-                    R.drawable.ic_android_default_round,
-                    app.getName(),
-                    app.getPackageName(),
-                    app.getPackageName().equals("com.whatsapp") ? true : false,
-                    app.isExperimental()
-            );
-            if (app.isExperimental()) {
-                experimentalApps.add(item);
-            } else {
-                regularApps.add(item);
-            }
-        }
-
-        // Add regular apps section
-        if (!regularApps.isEmpty()) {
-            for (AppItem app : regularApps) {
-                dialogItems.add(new com.parishod.watomatic.model.data.DialogListItem.AppItemWrapper(app));
-            }
-        }
-
-        // Add experimental apps section
-        if (!experimentalApps.isEmpty()) {
-            dialogItems.add(new com.parishod.watomatic.model.data.DialogListItem.SectionHeader(getString(R.string.experimental)));
-            for (AppItem app : experimentalApps) {
-                dialogItems.add(new com.parishod.watomatic.model.data.DialogListItem.AppItemWrapper(app));
-            }
-        }
-
-        DialogConfig config = new DialogConfig(
-                DialogType.APPS,
-                "Apps",
-                "Select the apps you want to enable auto-reply for.", // description not needed for this dialog
-                false, // showSearch
-                "Search",
-                "",
-                dialogItems
-        );
-
-        UniversalDialogFragment dialog = UniversalDialogFragment.Companion.newInstance(requireActivity(), config);
-        dialog.setActionListener(this);
-        dialog.show(((MainActivity) requireActivity()).getSupportFragmentManager(), "apps_dialog");
-    }
-
-    // Dialog 2: Message Type with radio buttons
-    private void showMessageTypeDialog() {
-        List<MessageTypeItem> messageTypes = Arrays.asList(
-                new MessageTypeItem(getResources().getString(R.string.direct_messages), !preferencesManager.isGroupReplyEnabled()),  // Pre-selected
-                new MessageTypeItem(getResources().getString(R.string.all_messages), preferencesManager.isGroupReplyEnabled())
-                //new MessageTypeItem("Messages from Unknown Senders", false)
-        );
-
-        DialogConfig config = new DialogConfig(
-                DialogType.MESSAGE_TYPE,
-                "Message Type",
-                "Select message types",
-                false, // showSearch not needed
-                "Search",
-                "",  // searchHint not needed
-                messageTypes
-        );
-
-        UniversalDialogFragment dialog = UniversalDialogFragment.Companion.newInstance(requireActivity(),config);
-        dialog.setActionListener(this);
-        dialog.show(((MainActivity) requireActivity()).getSupportFragmentManager(), "message_type_dialog");
-    }
-
-    // Dialog 3: Cooldown with selection boxes
-    private void showCooldownDialog() {
-        List<CooldownItem> cooldownOptions = new ArrayList<>();
-        long cooldownInMinutes = preferencesManager.getAutoReplyDelay() / (60 * 1000);
-        initialCooldownTime = (int) cooldownInMinutes;
-        cooldownOptions.add(new CooldownItem((int) cooldownInMinutes));
-
-        DialogConfig config = new DialogConfig(
-                DialogType.COOLDOWN,
-                "Reply Cooldown",
-                "Set a minimum time interval between automatic replies to the same contact. " +
-                        "This prevents sending multiple replies in quick succession.",
-                false, // showSearch not needed
-                "",    // searchHint not needed
-                "Save",
-                cooldownOptions
-        );
-
-        UniversalDialogFragment dialog = UniversalDialogFragment.Companion.newInstance(requireActivity(), config);
-        dialog.setActionListener(this);
-        dialog.show(((MainActivity) requireActivity()).getSupportFragmentManager(), "cooldown_dialog");
-    }
-
-    @Override
-    public void onSaveClicked(DialogType dialogType) {
-        if (dialogType == DialogType.COOLDOWN) {
-            if(selectedCooldownTime != -1) {
-                long cooldownInMillis = selectedCooldownTime * 60 * 1000L;
-                preferencesManager.setAutoReplyDelay(cooldownInMillis);
-                updateCooldownFilterDisplay();
-                Toast.makeText(requireActivity(), "Cooldown settings saved", Toast.LENGTH_SHORT).show();
-            }
-            selectedCooldownTime = -1;//reset so that no accidental cahnges on going back to cooldown page
-        }
-    }
-
-    @Override
-    public void onItemToggled(int position, boolean isChecked) {
-        // Handle toggle switches (for Apps and Contacts)
-        Log.d("Dialog", "Item at position " + position + " toggled: " + isChecked);
-        enabledAppsCount.setText(String.format(getResources().getString(R.string.apps_enabled_count), preferencesManager.getEnabledApps().size(), Constants.SUPPORTED_APPS.size()));
-    }
-
-    @Override
-    public void onItemSelected(int position, boolean isSelected) {
-        // Handle radio button selections (for Message Type)
-        Log.d("Dialog", "Item at position " + position + " selected: " + isSelected);
-        PreferencesManager.getPreferencesInstance(requireActivity()).setGroupReplyPref(position == 1);
-        updateMessageType();
-    }
-
-    @Override
-    public void onSearchQuery(String query) {
-        // Handle search queries
-        Log.d("Dialog", "Search query: " + query);
-        // You can filter your data here and update the adapter
-    }
-
-    @Override
-    public void onCooldownChanged(int totalMinutes) {
-        selectedCooldownTime = totalMinutes;
-        if (selectedCooldownTime != initialCooldownTime) {
-            Fragment dialogFragment = getParentFragmentManager().findFragmentByTag("cooldown_dialog");
-            if (dialogFragment instanceof UniversalDialogFragment) {
-                ((UniversalDialogFragment) dialogFragment).setSaveButtonEnabled(true);
-            }
-        }
-        Log.d("Dialog", "Total cooldown time: " + totalMinutes);
     }
 }

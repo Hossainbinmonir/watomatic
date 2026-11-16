@@ -30,6 +30,8 @@ class RuleDashboardActivity : BaseActivity(), RuleListAdapter.RuleActionListener
     private val viewModel: RuleDashboardViewModel by viewModels()
     private lateinit var adapter: RuleListAdapter
     private lateinit var preferencesManager: PreferencesManager
+    private var renderedCategories: List<String> = emptyList()
+    private var isUpdatingCategoryChips: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,6 +96,14 @@ class RuleDashboardActivity : BaseActivity(), RuleListAdapter.RuleActionListener
             viewModel.setFilterTab(tab)
         }
 
+        binding.chipGroupCategoryFilter.setOnCheckedStateChangeListener { group, checkedIds ->
+            if (isUpdatingCategoryChips) return@setOnCheckedStateChangeListener
+            val checkedId = checkedIds.firstOrNull()
+            val chip = if (checkedId != null) group.findViewById<com.google.android.material.chip.Chip>(checkedId) else null
+            val category = chip?.tag as? String
+            viewModel.setSelectedCategory(category)
+        }
+
         binding.fabAddRule.setOnClickListener { openCreateRule() }
         binding.btnEmptyCreateRule.setOnClickListener { openCreateRule() }
     }
@@ -105,6 +115,9 @@ class RuleDashboardActivity : BaseActivity(), RuleListAdapter.RuleActionListener
                     binding.tvTotalRulesCount.text = state.totalRules.toString()
                     binding.tvActiveRulesCount.text = state.activeRules.toString()
                     binding.tvInactiveRulesCount.text = state.inactiveRules.toString()
+
+                    renderCategoryChipsIfNeeded(state.availableCategories, state.selectedCategory)
+                    updateCategoryBulkBar(state)
 
                     adapter.submitList(state.displayedRules)
 
@@ -123,6 +136,81 @@ class RuleDashboardActivity : BaseActivity(), RuleListAdapter.RuleActionListener
                     }
                 }
             }
+        }
+    }
+
+    private fun renderCategoryChipsIfNeeded(categories: List<String>, selectedCategory: String?) {
+        if (categories.isEmpty()) {
+            binding.categoryFilterScroll.visibility = View.GONE
+            renderedCategories = emptyList()
+            return
+        }
+
+        binding.categoryFilterScroll.visibility = View.VISIBLE
+        if (renderedCategories == categories) {
+            isUpdatingCategoryChips = true
+            for (i in 0 until binding.chipGroupCategoryFilter.childCount) {
+                val chip = binding.chipGroupCategoryFilter.getChildAt(i) as? com.google.android.material.chip.Chip ?: continue
+                val chipTag = chip.tag as? String
+                chip.isChecked = if (selectedCategory == null) {
+                    chipTag == null
+                } else {
+                    chipTag != null && chipTag.equals(selectedCategory, ignoreCase = true)
+                }
+            }
+            isUpdatingCategoryChips = false
+            return
+        }
+
+        renderedCategories = categories
+        isUpdatingCategoryChips = true
+        binding.chipGroupCategoryFilter.removeAllViews()
+
+        val allChip = com.google.android.material.chip.Chip(this).apply {
+            id = View.generateViewId()
+            text = getString(R.string.rule_category_all)
+            tag = null
+            isCheckable = true
+            isChecked = selectedCategory == null
+        }
+        binding.chipGroupCategoryFilter.addView(allChip)
+
+        for (category in categories) {
+            val chip = com.google.android.material.chip.Chip(this).apply {
+                id = View.generateViewId()
+                text = category
+                tag = category
+                isCheckable = true
+                isChecked = selectedCategory != null && selectedCategory.equals(category, ignoreCase = true)
+            }
+            binding.chipGroupCategoryFilter.addView(chip)
+        }
+        isUpdatingCategoryChips = false
+    }
+
+    private fun updateCategoryBulkBar(state: RuleDashboardUiState) {
+        val cat = state.selectedCategory
+        if (cat.isNullOrBlank()) {
+            binding.categoryBulkBar.visibility = View.GONE
+            return
+        }
+        binding.categoryBulkBar.visibility = View.VISIBLE
+        val shouldPauseAll = state.selectedCategoryHasActiveRules
+        binding.btnToggleCategoryRules.text = getString(
+            if (shouldPauseAll) R.string.rule_category_pause_all else R.string.rule_category_enable_all,
+            cat
+        )
+        binding.btnToggleCategoryRules.setOnClickListener {
+            val enableTarget = !shouldPauseAll
+            viewModel.setCategoryRulesEnabled(cat, enableTarget)
+            Toast.makeText(
+                this,
+                getString(
+                    if (enableTarget) R.string.rule_category_enabled_toast else R.string.rule_category_paused_toast,
+                    cat
+                ),
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
 

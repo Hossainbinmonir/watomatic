@@ -1,5 +1,6 @@
 package com.parishod.watomatic.network;
 
+import com.google.gson.JsonElement;
 import com.parishod.watomatic.network.model.openai.OpenAIRequest;
 import com.parishod.watomatic.network.model.openai.OpenAIResponse;
 import com.parishod.watomatic.network.model.openai.OpenAIModelsResponse; // Added import
@@ -10,10 +11,18 @@ import retrofit2.http.GET; // Added import
 import retrofit2.http.Header;
 import retrofit2.http.HeaderMap;
 import retrofit2.http.POST;
+import retrofit2.http.Url;
 
 public interface OpenAIService {
     @POST("v1/chat/completions")
     Call<OpenAIResponse> getChatCompletion(
+        @Header("Authorization") String authorization,
+        @Body OpenAIRequest requestBody
+    );
+
+    @POST
+    Call<OpenAIResponse> getChatCompletion(
+        @Url String url,
         @Header("Authorization") String authorization,
         @Body OpenAIRequest requestBody
     );
@@ -23,6 +32,12 @@ public interface OpenAIService {
 
     @GET("v1/models")
     Call<OpenAIModelsResponse> getModels(@HeaderMap java.util.Map<String, String> headers);
+
+    @GET
+    Call<JsonElement> getModelsDynamic(
+        @Url String url,
+        @HeaderMap java.util.Map<String, String> headers
+    );
 
     @POST
     Call<com.google.gson.JsonObject> getClaudeCompletion(
