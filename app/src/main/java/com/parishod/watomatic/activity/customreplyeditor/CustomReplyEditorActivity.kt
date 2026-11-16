@@ -48,20 +48,29 @@ class CustomReplyEditorActivity : BaseActivity() {
         if (result.resultCode == RESULT_OK) {
             val data = result.data
             if (data != null) {
-                val provider = data.getStringExtra("provider")
-                val apiKey = data.getStringExtra("apiKey")
-                val model = data.getStringExtra("model")
-                val systemPrompt = data.getStringExtra("systemPrompt")
-                val baseUrl = data.getStringExtra("baseUrl")
+                val provider = data.getStringExtra("provider")?.trim()
+                val apiKey = data.getStringExtra("apiKey")?.trim()
+                val model = data.getStringExtra("model")?.trim()
+                val systemPrompt = data.getStringExtra("systemPrompt")?.trim()
+                val baseUrl = data.getStringExtra("baseUrl")?.trim()
 
-                if (apiKey != null) preferencesManager?.saveOpenAIApiKey(apiKey)
-                if (provider != null) preferencesManager?.saveOpenApiSource(provider)
-                if (model != null) preferencesManager?.saveSelectedOpenAIModel(model)
+                if (!apiKey.isNullOrEmpty()) preferencesManager?.saveOpenAIApiKey(apiKey)
+                if (!provider.isNullOrEmpty()) preferencesManager?.saveOpenApiSource(provider)
+                if (!model.isNullOrEmpty()) preferencesManager?.saveSelectedOpenAIModel(model)
                 if (systemPrompt != null) preferencesManager?.saveOpenAICustomPrompt(systemPrompt)
                 if (baseUrl != null) preferencesManager?.saveCustomOpenAIApiUrl(baseUrl)
 
+                preferencesManager?.clearOpenAILastPersistentError()
+
+                if (!apiKey.isNullOrEmpty() && apiKey != "PENDING_CONFIGURATION") {
+                    preferencesManager?.setEnableAutomaticAiReplies(false)
+                    preferencesManager?.setEnableByokReplies(true)
+                    selectedReplyMethod = REPLY_METHOD_BYOK
+                    initialSelectedReplyMethod = REPLY_METHOD_BYOK
+                }
+
                 Toast.makeText(this, "AI Configuration Saved", Toast.LENGTH_SHORT).show()
-                updateCardExpansionState(REPLY_METHOD_BYOK)
+                updateCardExpansionState(selectedReplyMethod)
             }
         }
     }
@@ -95,6 +104,7 @@ class CustomReplyEditorActivity : BaseActivity() {
         initializeViews()
         setupClickListeners()
         handleDeepLink()
+        restoreSelectedReplyMethod()
 
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.custom_reply_editor_scroll_view)) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -105,7 +115,7 @@ class CustomReplyEditorActivity : BaseActivity() {
 
     override fun onResume() {
         super.onResume()
-        restoreSelectedReplyMethod()
+        updateCardExpansionState(selectedReplyMethod)
     }
 
     private fun initializeViews() {
@@ -194,13 +204,15 @@ class CustomReplyEditorActivity : BaseActivity() {
                 preferencesManager?.setEnableByokReplies(false)
             }
             REPLY_METHOD_BYOK -> {
-                val apiKey = preferencesManager?.openAIApiKey
+                val apiKey = preferencesManager?.openAIApiKey?.trim()
                 if (apiKey.isNullOrEmpty() || apiKey == "PENDING_CONFIGURATION") {
                     Toast.makeText(
                         this,
                         "Please configure your AI provider settings",
                         Toast.LENGTH_LONG
                     ).show()
+                    val intent = Intent(this, OtherAiConfigurationActivity::class.java)
+                    otherAiConfigLauncher.launch(intent)
                     return
                 }
                 preferencesManager?.setEnableAutomaticAiReplies(false)
@@ -214,8 +226,8 @@ class CustomReplyEditorActivity : BaseActivity() {
 
     private fun updateCardExpansionState(selectedMethod: String) {
         Log.d("CustomReplyEditor", "updateCardExpansionState reply method: $selectedMethod")
-        val hasApiKey = !preferencesManager?.openAIApiKey.isNullOrEmpty() &&
-            preferencesManager?.openAIApiKey != "PENDING_CONFIGURATION"
+        val rawApiKey = preferencesManager?.openAIApiKey?.trim()
+        val hasApiKey = !rawApiKey.isNullOrEmpty() && rawApiKey != "PENDING_CONFIGURATION"
 
         val selectedStrokeWidth = TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_DIP,
@@ -253,18 +265,23 @@ class CustomReplyEditorActivity : BaseActivity() {
         }
         otherAiCheckIcon?.visibility = if (isByokSelected) android.view.View.VISIBLE else android.view.View.GONE
 
-        if (isByokSelected) {
+        if (isByokSelected || hasApiKey) {
             otherAiExpandedContent?.visibility = android.view.View.VISIBLE
+            val statusView = findViewById<TextView>(R.id.other_ai_status_text)
             if (hasApiKey) {
-                findViewById<TextView>(R.id.other_ai_status_text)?.apply {
-                    text = "Status: Configured"
-                    setTextColor(ContextCompat.getColor(this@CustomReplyEditorActivity, R.color.rule_active_accent))
+                val provider = preferencesManager?.openApiSource?.takeIf { it.isNotBlank() } ?: "OpenAI"
+                val model = preferencesManager?.selectedOpenAIModel?.takeIf { it.isNotBlank() } ?: "Default"
+                val lastError = preferencesManager?.openAILastPersistentErrorMessage?.takeIf { it.isNotBlank() }
+                if (lastError != null) {
+                    statusView?.text = "Configured • $provider ($model)\nLast error: $lastError"
+                    statusView?.setTextColor(ContextCompat.getColor(this@CustomReplyEditorActivity, R.color.rule_danger))
+                } else {
+                    statusView?.text = "Configured • $provider ($model)"
+                    statusView?.setTextColor(ContextCompat.getColor(this@CustomReplyEditorActivity, R.color.rule_active_accent))
                 }
             } else {
-                findViewById<TextView>(R.id.other_ai_status_text)?.apply {
-                    text = "Status: Not Configured"
-                    setTextColor(ContextCompat.getColor(this@CustomReplyEditorActivity, R.color.rule_danger))
-                }
+                statusView?.text = "Status: Not Configured"
+                statusView?.setTextColor(ContextCompat.getColor(this@CustomReplyEditorActivity, R.color.rule_danger))
             }
         } else {
             otherAiExpandedContent?.visibility = android.view.View.GONE

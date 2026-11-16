@@ -115,11 +115,37 @@ public class NotificationService extends NotificationListenerService {
         }
         Bundle extras = sbn.getNotification().extras;
         CharSequence text = extras.getCharSequence(android.app.Notification.EXTRA_TEXT);
-        if (text != null) {
+        if (text != null && !text.toString().trim().isEmpty()) {
             return text.toString();
         }
         Object rawText = extras.get("android.text");
-        return rawText != null ? rawText.toString() : null;
+        if (rawText != null && !rawText.toString().trim().isEmpty()) {
+            return rawText.toString();
+        }
+        CharSequence bigText = extras.getCharSequence(android.app.Notification.EXTRA_BIG_TEXT);
+        if (bigText != null && !bigText.toString().trim().isEmpty()) {
+            return bigText.toString();
+        }
+        CharSequence[] textLines = extras.getCharSequenceArray(android.app.Notification.EXTRA_TEXT_LINES);
+        if (textLines != null && textLines.length > 0) {
+            for (int i = textLines.length - 1; i >= 0; i--) {
+                if (textLines[i] != null && !textLines[i].toString().trim().isEmpty()) {
+                    return textLines[i].toString();
+                }
+            }
+        }
+        android.os.Parcelable[] messages = extras.getParcelableArray("android.messages");
+        if (messages != null && messages.length > 0) {
+            for (int i = messages.length - 1; i >= 0; i--) {
+                if (messages[i] instanceof Bundle) {
+                    CharSequence msgText = ((Bundle) messages[i]).getCharSequence("text");
+                    if (msgText != null && !msgText.toString().trim().isEmpty()) {
+                        return msgText.toString();
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     private void sendActualReply(StatusBarNotification sbn, NotificationWear notificationWear, String replyText) {
@@ -203,8 +229,7 @@ public class NotificationService extends NotificationListenerService {
         }
         String fallbackReplyText = replyText; // needs to be final to access in inner class hence one more variable
 
-        CharSequence incomingMessageChars = sbn.getNotification().extras.getCharSequence(android.app.Notification.EXTRA_TEXT);
-        String incomingMessage = (incomingMessageChars != null) ? incomingMessageChars.toString() : null;
+        String incomingMessage = extractIncomingMessage(sbn);
 
         // Determine if BYOK AI should be used
         boolean shouldUseAI = false;
@@ -215,7 +240,8 @@ public class NotificationService extends NotificationListenerService {
             shouldUseAI = apiKey != null && !apiKey.trim().isEmpty() &&
                          !apiKey.equals("PENDING_CONFIGURATION") &&
                          incomingMessage != null && !incomingMessage.trim().isEmpty();
-            Log.d(TAG, "BYOK mode - API key configured: " + (apiKey != null && !apiKey.trim().isEmpty()));
+            Log.d(TAG, "BYOK mode - API key configured: " + (apiKey != null && !apiKey.trim().isEmpty())
+                    + ", incomingMessage present: " + (incomingMessage != null && !incomingMessage.trim().isEmpty()));
         }
 
         if (shouldUseAI) {
@@ -225,6 +251,35 @@ public class NotificationService extends NotificationListenerService {
             Log.d(TAG, "AI conditions not met. Using default reply.");
             sendActualReply(sbn, notificationWear, fallbackReplyText);
         }
+    }
+
+    private String getDefaultModelForProvider(String provider) {
+        if ("Gemini".equalsIgnoreCase(provider)) return "gemini-2.5-flash";
+        if ("Claude".equalsIgnoreCase(provider)) return "claude-sonnet-4-20250514";
+        if ("Grok".equalsIgnoreCase(provider)) return "grok-3-mini";
+        if ("DeepSeek".equalsIgnoreCase(provider)) return "deepseek-chat";
+        if ("Mistral".equalsIgnoreCase(provider)) return "mistral-small-latest";
+        return DEFAULT_LLM_MODEL;
+    }
+
+    private void recordAiError(PreferencesManager prefs, String errorDetail) {
+        prefs.saveOpenAILastPersistentError(errorDetail, System.currentTimeMillis());
+    }
+
+    private String extractErrorSnippet(Response<?> response) {
+        String msg = "HTTP " + response.code();
+        try {
+            if (response.errorBody() != null) {
+                String body = response.errorBody().string();
+                if (body != null && !body.trim().isEmpty()) {
+                    body = body.trim().replaceAll("\\s+", " ");
+                    if (body.length() > 140) body = body.substring(0, 140) + "...";
+                    msg = msg + ": " + body;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return msg;
     }
 
     private void fetchAiReply(StatusBarNotification sbn, NotificationWear notificationWear, String incomingMessage, String fallbackReplyText) {
@@ -250,7 +305,9 @@ public class NotificationService extends NotificationListenerService {
         String model = prefs.getSelectedOpenAIModel();
         String systemPrompt = prefs.getOpenAICustomPrompt();
         if (systemPrompt == null || systemPrompt.trim().isEmpty()) systemPrompt = DEFAULT_LLM_PROMPT;
-        if (model == null || model.trim().isEmpty()) model = DEFAULT_LLM_MODEL;
+        if (model == null || model.trim().isEmpty()) {
+            model = getDefaultModelForProvider(provider);
+        }
         model = model.trim();
 
         String baseUrl = null;
@@ -271,16 +328,16 @@ public class NotificationService extends NotificationListenerService {
         OpenAIService service = RetrofitInstance.getOpenAIRetrofitInstance(baseUrl).create(OpenAIService.class);
 
         if ("Claude".equalsIgnoreCase(provider)) {
-            fetchClaudeReply(service, baseUrl, apiKey, model, systemPrompt, incomingMessage, sbn, notificationWear, fallbackReplyText);
+            fetchClaudeReply(prefs, service, baseUrl, apiKey, model, systemPrompt, incomingMessage, sbn, notificationWear, fallbackReplyText);
         } else if ("Gemini".equalsIgnoreCase(provider)) {
-            fetchGeminiReply(service, baseUrl, apiKey, model, systemPrompt, incomingMessage, sbn, notificationWear, fallbackReplyText);
+            fetchGeminiReply(prefs, service, baseUrl, apiKey, model, systemPrompt, incomingMessage, sbn, notificationWear, fallbackReplyText);
         } else {
             // OpenAI, Grok, DeepSeek, Mistral, Custom
-            fetchOpenAiCompatibleReply(service, baseUrl, apiKey, model, systemPrompt, incomingMessage, sbn, notificationWear, fallbackReplyText);
+            fetchOpenAiCompatibleReply(prefs, service, baseUrl, apiKey, model, systemPrompt, incomingMessage, sbn, notificationWear, fallbackReplyText);
         }
     }
 
-    private void fetchClaudeReply(OpenAIService service, String baseUrl, String apiKey, String model, String systemPrompt, String incomingMessage, StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText) {
+    private void fetchClaudeReply(PreferencesManager prefs, OpenAIService service, String baseUrl, String apiKey, String model, String systemPrompt, String incomingMessage, StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText) {
         JsonObject requestBody = new JsonObject();
         requestBody.addProperty("model", model);
         requestBody.addProperty("max_tokens", 1024);
@@ -298,7 +355,12 @@ public class NotificationService extends NotificationListenerService {
         headers.put("anthropic-version", "2023-06-01");
         headers.put("content-type", "application/json");
 
-        String url = baseUrl.matches(".*/v\\d+[a-z0-9]*/$") ? baseUrl + "messages" : baseUrl + "v1/messages";
+        String url;
+        if (baseUrl.endsWith("/messages/")) {
+            url = baseUrl.substring(0, baseUrl.length() - 1);
+        } else {
+            url = baseUrl.matches(".*/v\\d+[a-z0-9]*/$") ? baseUrl + "messages" : baseUrl + "v1/messages";
+        }
 
         service.getClaudeCompletion(url, headers, requestBody).enqueue(new Callback<JsonObject>() {
             @Override
@@ -307,33 +369,46 @@ public class NotificationService extends NotificationListenerService {
                     try {
                         JsonArray content = response.body().getAsJsonArray("content");
                         if (content != null && content.size() > 0) {
-                            String reply = content.get(0).getAsJsonObject().get("text").getAsString();
-                            sendActualReply(sbn, notificationWear, reply, getString(R.string.history_source_ai));
-                            return;
+                            StringBuilder sb = new StringBuilder();
+                            for (int i = 0; i < content.size(); i++) {
+                                JsonObject block = content.get(i).getAsJsonObject();
+                                if (block.has("text") && !block.get("text").isJsonNull()) {
+                                    if (sb.length() > 0) sb.append("\n");
+                                    sb.append(block.get("text").getAsString());
+                                }
+                            }
+                            String reply = sb.toString().trim();
+                            if (!reply.isEmpty()) {
+                                prefs.clearOpenAILastPersistentError();
+                                sendActualReply(sbn, notificationWear, reply, getString(R.string.history_source_ai));
+                                return;
+                            }
                         }
                     } catch (Exception e) {
                         Log.e(TAG, "Error parsing Claude response", e);
                     }
                 }
-                Log.e(TAG, "Claude API failed: " + response.code() + " " + response.message());
+                String err = response.isSuccessful() ? "Empty Claude response" : extractErrorSnippet(response);
+                Log.e(TAG, "Claude API failed: " + err);
+                recordAiError(prefs, err);
                 sendActualReply(sbn, notificationWear, fallbackReplyText);
             }
 
             @Override
             public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
                 Log.e(TAG, "Claude API network error", t);
+                recordAiError(prefs, t.getLocalizedMessage() != null ? t.getLocalizedMessage() : "Network error");
                 sendActualReply(sbn, notificationWear, fallbackReplyText);
             }
         });
     }
 
-    private void fetchGeminiReply(OpenAIService service, String baseUrl, String apiKey, String model, String systemPrompt, String incomingMessage, StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText) {
+    private void fetchGeminiReply(PreferencesManager prefs, OpenAIService service, String baseUrl, String apiKey, String model, String systemPrompt, String incomingMessage, StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText) {
         JsonObject requestBody = new JsonObject();
         JsonArray contents = new JsonArray();
         JsonObject contentObj = new JsonObject();
         JsonArray parts = new JsonArray();
         JsonObject part = new JsonObject();
-        // Combine system prompt and user message for simplicity
         part.addProperty("text", systemPrompt + "\n\nUser: " + incomingMessage);
         parts.add(part);
         contentObj.add("parts", parts);
@@ -341,9 +416,14 @@ public class NotificationService extends NotificationListenerService {
         requestBody.add("contents", contents);
 
         String cleanModel = model.startsWith("models/") ? model.substring("models/".length()) : model;
-        String url = baseUrl.matches(".*/v1(beta|alpha)?/$")
-                ? baseUrl + "models/" + cleanModel + ":generateContent"
-                : baseUrl + "v1beta/models/" + cleanModel + ":generateContent";
+        String url;
+        if (baseUrl.endsWith(":generateContent/")) {
+            url = baseUrl.substring(0, baseUrl.length() - 1);
+        } else {
+            url = baseUrl.matches(".*/v1(beta|alpha)?/$")
+                    ? baseUrl + "models/" + cleanModel + ":generateContent"
+                    : baseUrl + "v1beta/models/" + cleanModel + ":generateContent";
+        }
 
         service.getGeminiCompletion(url, apiKey, requestBody).enqueue(new Callback<JsonObject>() {
             @Override
@@ -354,39 +434,66 @@ public class NotificationService extends NotificationListenerService {
                         if (candidates != null && candidates.size() > 0) {
                             JsonObject candidate = candidates.get(0).getAsJsonObject();
                             JsonObject content = candidate.getAsJsonObject("content");
-                            JsonArray parts = content.getAsJsonArray("parts");
-                            if (parts != null && parts.size() > 0) {
-                                String reply = parts.get(0).getAsJsonObject().get("text").getAsString();
-                                sendActualReply(sbn, notificationWear, reply, getString(R.string.history_source_ai));
-                                return;
+                            JsonArray respParts = content != null ? content.getAsJsonArray("parts") : null;
+                            if (respParts != null && respParts.size() > 0) {
+                                StringBuilder replyBuilder = new StringBuilder();
+                                String fallbackPartText = null;
+                                for (int i = 0; i < respParts.size(); i++) {
+                                    JsonObject p = respParts.get(i).getAsJsonObject();
+                                    boolean isThought = p.has("thought") && !p.get("thought").isJsonNull() && p.get("thought").getAsBoolean();
+                                    if (p.has("text") && !p.get("text").isJsonNull()) {
+                                        String txt = p.get("text").getAsString();
+                                        fallbackPartText = txt;
+                                        if (!isThought) {
+                                            replyBuilder.append(txt);
+                                        }
+                                    }
+                                }
+                                String reply = replyBuilder.toString().trim();
+                                if (reply.isEmpty() && fallbackPartText != null) {
+                                    reply = fallbackPartText.trim();
+                                }
+                                if (!reply.isEmpty()) {
+                                    prefs.clearOpenAILastPersistentError();
+                                    sendActualReply(sbn, notificationWear, reply, getString(R.string.history_source_ai));
+                                    return;
+                                }
                             }
                         }
                     } catch (Exception e) {
                         Log.e(TAG, "Error parsing Gemini response", e);
                     }
                 }
-                Log.e(TAG, "Gemini API failed: " + response.code() + " " + response.message());
+                String err = response.isSuccessful() ? "Empty Gemini response" : extractErrorSnippet(response);
+                Log.e(TAG, "Gemini API failed: " + err);
+                recordAiError(prefs, err);
                 sendActualReply(sbn, notificationWear, fallbackReplyText);
             }
 
             @Override
             public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
                 Log.e(TAG, "Gemini API network error", t);
+                recordAiError(prefs, t.getLocalizedMessage() != null ? t.getLocalizedMessage() : "Network error");
                 sendActualReply(sbn, notificationWear, fallbackReplyText);
             }
         });
     }
 
-    private void fetchOpenAiCompatibleReply(OpenAIService service, String baseUrl, String apiKey, String model, String systemPrompt, String incomingMessage, StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText) {
+    private void fetchOpenAiCompatibleReply(PreferencesManager prefs, OpenAIService service, String baseUrl, String apiKey, String model, String systemPrompt, String incomingMessage, StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText) {
         List<Message> messages = new ArrayList<>();
         messages.add(new Message("system", systemPrompt));
         messages.add(new Message("user", incomingMessage));
 
         OpenAIRequest request = new OpenAIRequest(model, messages);
         String bearerToken = "Bearer " + apiKey;
-        String completionsUrl = (baseUrl.matches(".*/v\\d+[a-z0-9]*/$") || baseUrl.endsWith("/openai/"))
-                ? baseUrl + "chat/completions"
-                : baseUrl + "v1/chat/completions";
+        String completionsUrl;
+        if (baseUrl.endsWith("/chat/completions/")) {
+            completionsUrl = baseUrl.substring(0, baseUrl.length() - 1);
+        } else {
+            completionsUrl = (baseUrl.matches(".*/v\\d+[a-z0-9]*/$") || baseUrl.endsWith("/openai/"))
+                    ? baseUrl + "chat/completions"
+                    : baseUrl + "v1/chat/completions";
+        }
 
         service.getChatCompletion(completionsUrl, bearerToken, request).enqueue(new Callback<OpenAIResponse>() {
             @Override
@@ -397,18 +504,24 @@ public class NotificationService extends NotificationListenerService {
                     response.body().getChoices().get(0).getMessage().getContent() != null) {
 
                     String aiReply = response.body().getChoices().get(0).getMessage().getContent().trim();
-                    Log.i(TAG, "OpenAI/Compatible successful response: " + aiReply);
-                    sendActualReply(sbn, notificationWear, aiReply, getString(R.string.history_source_ai));
-                } else {
-                    Log.e(TAG, "OpenAI/Compatible API failed: " + response.code() + " " + response.message());
-                    // Fallback to default reply
-                    sendActualReply(sbn, notificationWear, fallbackReplyText);
+                    if (!aiReply.isEmpty()) {
+                        Log.i(TAG, "OpenAI/Compatible successful response: " + aiReply);
+                        prefs.clearOpenAILastPersistentError();
+                        sendActualReply(sbn, notificationWear, aiReply, getString(R.string.history_source_ai));
+                        return;
+                    }
                 }
+                String err = response.isSuccessful() ? "Empty AI response" : extractErrorSnippet(response);
+                Log.e(TAG, "OpenAI/Compatible API failed: " + err);
+                recordAiError(prefs, err);
+                // Fallback to default reply
+                sendActualReply(sbn, notificationWear, fallbackReplyText);
             }
 
             @Override
             public void onFailure(@NonNull Call<OpenAIResponse> call, @NonNull Throwable t) {
                 Log.e(TAG, "OpenAI/Compatible API network error", t);
+                recordAiError(prefs, t.getLocalizedMessage() != null ? t.getLocalizedMessage() : "Network error");
                 sendActualReply(sbn, notificationWear, fallbackReplyText);
             }
         });

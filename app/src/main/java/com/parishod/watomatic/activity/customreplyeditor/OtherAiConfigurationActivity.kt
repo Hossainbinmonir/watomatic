@@ -427,12 +427,17 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
     }
 
     private fun saveConfiguration() {
-        val provider = providerInput.text.toString().trim()
+        val provider = normalizeProviderName(providerInput.text.toString())
         val apiKey = apiKeyInput.text.toString().trim()
         val model = modelInput.text.toString().trim()
+        val baseUrl = baseUrlInput.text.toString().trim()
 
         if (apiKey.isEmpty()) {
             Toast.makeText(this, "API key cannot be empty", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (provider == CUSTOM_AI_PROVIDER_NAME && !isValidUrl(baseUrl)) {
+            Toast.makeText(this, getString(R.string.error_invalid_url), Toast.LENGTH_SHORT).show()
             return
         }
         if (model.isEmpty()) {
@@ -446,14 +451,14 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         resultIntent.putExtra("model", model)
         resultIntent.putExtra("systemPrompt", systemPromptInput.text.toString().trim())
         if (provider == CUSTOM_AI_PROVIDER_NAME) {
-            resultIntent.putExtra("baseUrl", baseUrlInput.text.toString().trim())
+            resultIntent.putExtra("baseUrl", baseUrl)
         }
 
         initialProvider = provider
         initialApiKey = apiKey
         initialModel = model
         initialSystemPrompt = systemPromptInput.text.toString()
-        initialBaseUrl = if (provider == CUSTOM_AI_PROVIDER_NAME) baseUrlInput.text.toString() else ""
+        initialBaseUrl = if (provider == CUSTOM_AI_PROVIDER_NAME) baseUrl else ""
 
         setResult(RESULT_OK, resultIntent)
         finish()

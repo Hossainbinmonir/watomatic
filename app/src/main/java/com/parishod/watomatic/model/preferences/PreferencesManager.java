@@ -79,32 +79,45 @@ public class PreferencesManager {
     private static PreferencesManager _instance;
     private final SharedPreferences _sharedPrefs;
     private SharedPreferences _encryptedSharedPrefs;
+    private final SharedPreferences _fallbackSecurePrefs;
     private final Context thisAppContext;
 
     private PreferencesManager(Context context) {
         thisAppContext = context;
         _sharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
+        _fallbackSecurePrefs = context.getSharedPreferences("watomatic_secure_prefs_fallback", Context.MODE_PRIVATE);
+        _encryptedSharedPrefs = createEncryptedSharedPrefs(context);
+        if (_encryptedSharedPrefs == null) {
+            try {
+                context.getSharedPreferences("watomatic_secure_prefs", Context.MODE_PRIVATE)
+                        .edit().clear().apply();
+                _encryptedSharedPrefs = createEncryptedSharedPrefs(context);
+            } catch (Exception e) {
+                Log.e("PreferencesManager", "Retry creating EncryptedSharedPreferences failed", e);
+            }
+        }
+        init();
+    }
+
+    private SharedPreferences createEncryptedSharedPrefs(Context context) {
         try {
             String masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC);
-
-            // Corrected order: fileName, masterKeyAlias, context, scheme, scheme
-            _encryptedSharedPrefs = EncryptedSharedPreferences.create(
-                "watomatic_secure_prefs", // File name (String)
-                masterKeyAlias,           // Master Key Alias (String)
-                context,                  // Context
+            return EncryptedSharedPreferences.create(
+                "watomatic_secure_prefs",
+                masterKeyAlias,
+                context,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             );
-        } catch (GeneralSecurityException | IOException e) {
+        } catch (Exception e) {
             Log.e("PreferencesManager", "Error initializing EncryptedSharedPreferences", e);
-            _encryptedSharedPrefs = null;
+            return null;
         } catch (Error e) {
             // Catches LinkageError/NoClassDefFoundError which can occur in test environments
             // when the Android Keystore hardware abstraction is not available.
             Log.e("PreferencesManager", "Error initializing EncryptedSharedPreferences (hardware unavailable)", e);
-            _encryptedSharedPrefs = null;
+            return null;
         }
-        init();
     }
 
     public static PreferencesManager getPreferencesInstance(Context context) {
@@ -414,21 +427,29 @@ public class PreferencesManager {
     }
 
     public void saveOpenAIApiKey(String apiKey) {
-        if (_encryptedSharedPrefs == null) {
-            Log.e("PreferencesManager", "EncryptedSharedPreferences not initialized. Cannot save API key.");
-            return;
+        if (_encryptedSharedPrefs != null) {
+            try {
+                _encryptedSharedPrefs.edit().putString(KEY_OPENAI_API_KEY, apiKey).apply();
+                return;
+            } catch (Exception e) {
+                Log.e("PreferencesManager", "EncryptedSharedPreferences write failed, using fallback", e);
+            }
         }
-        SharedPreferences.Editor editor = _encryptedSharedPrefs.edit();
-        editor.putString(KEY_OPENAI_API_KEY, apiKey);
-        editor.apply();
+        _fallbackSecurePrefs.edit().putString(KEY_OPENAI_API_KEY, apiKey).apply();
     }
 
     public String getOpenAIApiKey() {
-        if (_encryptedSharedPrefs == null) {
-            Log.e("PreferencesManager", "EncryptedSharedPreferences not initialized. Cannot get API key.");
-            return null;
+        if (_encryptedSharedPrefs != null) {
+            try {
+                String value = _encryptedSharedPrefs.getString(KEY_OPENAI_API_KEY, null);
+                if (value != null && !value.isEmpty()) {
+                    return value;
+                }
+            } catch (Exception e) {
+                Log.e("PreferencesManager", "EncryptedSharedPreferences read failed, using fallback", e);
+            }
         }
-        return _encryptedSharedPrefs.getString(KEY_OPENAI_API_KEY, null);
+        return _fallbackSecurePrefs.getString(KEY_OPENAI_API_KEY, null);
     }
 
     public void saveOpenApiSource(String apiSource) {
@@ -452,13 +473,14 @@ public class PreferencesManager {
     }
 
     public void deleteOpenAIApiKey() {
-        if (_encryptedSharedPrefs == null) {
-            Log.e("PreferencesManager", "EncryptedSharedPreferences not initialized. Cannot delete API key.");
-            return;
+        if (_encryptedSharedPrefs != null) {
+            try {
+                _encryptedSharedPrefs.edit().remove(KEY_OPENAI_API_KEY).apply();
+            } catch (Exception e) {
+                Log.e("PreferencesManager", "EncryptedSharedPreferences delete failed", e);
+            }
         }
-        SharedPreferences.Editor editor = _encryptedSharedPrefs.edit();
-        editor.remove(KEY_OPENAI_API_KEY);
-        editor.apply();
+        _fallbackSecurePrefs.edit().remove(KEY_OPENAI_API_KEY).apply();
     }
 
     public void setEnableOpenAIReplies(boolean enabled) {
