@@ -27,6 +27,11 @@ import androidx.core.app.RemoteInput;
 import com.parishod.watomatic.NotificationWear;
 import com.parishod.watomatic.R;
 import com.parishod.watomatic.model.CustomRepliesData;
+import com.parishod.watomatic.model.ai.AiConversationMessage;
+import com.parishod.watomatic.model.ai.AiMemoryDao;
+import com.parishod.watomatic.model.ai.AiMemoryDatabase;
+import com.parishod.watomatic.model.ai.AiNote;
+import com.parishod.watomatic.model.ai.AiReplyLog;
 import com.parishod.watomatic.network.OpenAIService;
 import com.parishod.watomatic.network.RetrofitInstance;
 import com.parishod.watomatic.network.model.openai.Message;
@@ -38,10 +43,16 @@ import com.parishod.watomatic.model.utils.DbUtils;
 import com.parishod.watomatic.model.utils.NotificationHelper;
 import com.parishod.watomatic.model.utils.NotificationUtils;
 import com.parishod.watomatic.model.rules.AutoReplyRule;
+import com.parishod.watomatic.service.ai.AiPolicyDecision;
+import com.parishod.watomatic.service.ai.AiPromptAndPolicyHelper;
+import com.parishod.watomatic.service.ai.ParsedAiResponse;
 import com.parishod.watomatic.service.rules.RuleNotificationProcessor;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import retrofit2.Call;
 import retrofit2.Callback;
@@ -53,6 +64,14 @@ public class NotificationService extends NotificationListenerService {
     private DbUtils dbUtils;
     private NotificationReplyDecider replyDecider;
     private RuleNotificationProcessor ruleNotificationProcessor;
+    private ExecutorService aiMemoryExecutor;
+
+    private ExecutorService getAiMemoryExecutor() {
+        if (aiMemoryExecutor == null || aiMemoryExecutor.isShutdown()) {
+            aiMemoryExecutor = Executors.newSingleThreadExecutor();
+        }
+        return aiMemoryExecutor;
+    }
 
     private NotificationReplyDecider getReplyDecider() {
         if (replyDecider == null) {
@@ -88,14 +107,30 @@ public class NotificationService extends NotificationListenerService {
                     @NonNull String replyText,
                     @NonNull AutoReplyRule matchedRule
             ) {
-                Log.d(TAG, "Rule matched (" + matchedRule.getName() + "), dispatching reply.");
-                sendActualReply(statusBarNotification, notificationWear, replyText, matchedRule.getName());
+                if (matchedRule.getUseAiReply()) {
+                    Log.d(TAG, "Rule matched with AI enabled (" + matchedRule.getName() + "), dispatching AI reply.");
+                    dispatchRuleAiReply(statusBarNotification, notificationWear, matchedRule);
+                } else {
+                    Log.d(TAG, "Rule matched (" + matchedRule.getName() + "), dispatching reply.");
+                    sendActualReply(statusBarNotification, notificationWear, replyText, matchedRule.getName());
+                }
             }
 
             @Override
             public void onFallbackToLegacy(@NonNull StatusBarNotification statusBarNotification) {
                 NotificationReplyDecider decider = getReplyDecider();
-                if (decider.canReply(statusBarNotification) && decider.shouldReply(statusBarNotification)) {
+                PreferencesManager prefs = PreferencesManager.getPreferencesInstance(NotificationService.this);
+                if (prefs.isByokRepliesEnabled()) {
+                    // Check base service, supported app, notification freshness, non-self sender, and contact whitelist/blacklist;
+                    // AI-specific group/cooldown/frequency limits are evaluated in sendReply -> prepareAndFetchAiReply.
+                    if (decider.isServiceEnabled()
+                            && decider.isSupportedPackage(statusBarNotification)
+                            && NotificationUtils.isNewNotification(statusBarNotification)
+                            && !isSelfMessage(statusBarNotification)
+                            && decider.shouldReply(statusBarNotification)) {
+                        sendReply(statusBarNotification);
+                    }
+                } else if (decider.canReply(statusBarNotification) && decider.shouldReply(statusBarNotification)) {
                     sendReply(statusBarNotification);
                 }
             }
@@ -107,6 +142,15 @@ public class NotificationService extends NotificationListenerService {
         super.onStartCommand(intent, flags, startId);
         //START_STICKY  to order the system to restart your service as soon as possible when it was killed.
         return START_STICKY;
+    }
+
+    private boolean isSelfMessage(StatusBarNotification sbn) {
+        if (sbn == null || sbn.getNotification() == null || sbn.getNotification().extras == null) {
+            return false;
+        }
+        String title = NotificationUtils.getTitle(sbn);
+        String selfDisplayName = sbn.getNotification().extras.getString("android.selfDisplayName");
+        return title != null && selfDisplayName != null && title.equalsIgnoreCase(selfDisplayName);
     }
 
     private String extractIncomingMessage(StatusBarNotification sbn) {
@@ -153,12 +197,10 @@ public class NotificationService extends NotificationListenerService {
     }
 
     private void sendActualReply(StatusBarNotification sbn, NotificationWear notificationWear, String replyText, String ruleOrSourceName) {
-        // customRepliesData = CustomRepliesData.getInstance(this); // Initialize if other methods from it are needed beyond replyText
-
         RemoteInput finalRemoteIn = null;
         Intent localIntent = new Intent();
         localIntent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-        Bundle localBundle = new Bundle(); // notificationWear.bundle;
+        Bundle localBundle = new Bundle();
         for (RemoteInput remoteIn : notificationWear.getRemoteInputs()) {
             if(remoteIn.getAllowFreeFormInput()) {
                 finalRemoteIn = remoteIn;
@@ -178,23 +220,6 @@ public class NotificationService extends NotificationListenerService {
                 String incomingMsg = extractIncomingMessage(sbn);
                 String sourceLabel = ruleOrSourceName != null ? ruleOrSourceName : getString(R.string.history_source_default);
                 dbUtils.logReply(sbn, NotificationUtils.getTitle(sbn), incomingMsg, replyText, sourceLabel);
-                
-                // Use ReplyService to send the reply in foreground
-                /*Intent replyServiceIntent = new Intent(this, ReplyService.class);
-                replyServiceIntent.putExtra("pendingIntent", notificationWear.getPendingIntent());
-                replyServiceIntent.putExtra("fillInIntent", localIntent);
-                
-                try {
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        startForegroundService(replyServiceIntent);
-                    } else {
-                        startService(replyServiceIntent);
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to start ReplyService: " + e.getMessage());
-                    // Fallback to direct send if service start fails (though likely to fail for FB)
-                    notificationWear.getPendingIntent().send(this, 0, localIntent);
-                }*/
 
                 notificationWear.getPendingIntent().send(this, 0, localIntent);
                 if (PreferencesManager.getPreferencesInstance(this).isShowNotificationEnabled()) {
@@ -211,14 +236,42 @@ public class NotificationService extends NotificationListenerService {
         }
     }
 
-    private void sendReply(StatusBarNotification sbn) {
-        final NotificationWear notificationWear = NotificationUtils.extractWearNotification(sbn);
-        if (notificationWear.getRemoteInputs().isEmpty()) {
+    private void dispatchRuleAiReply(
+            @NonNull StatusBarNotification sbn,
+            @NonNull NotificationWear notificationWear,
+            @NonNull AutoReplyRule matchedRule
+    ) {
+        PreferencesManager prefs = PreferencesManager.getPreferencesInstance(this);
+        String incomingMessage = extractIncomingMessage(sbn);
+        String fallback = (matchedRule.getReplyMessage() != null && !matchedRule.getReplyMessage().trim().isEmpty())
+                ? matchedRule.getReplyMessage().trim()
+                : getDefaultFallbackReply(prefs);
+
+        String apiKey = prefs.getOpenAIApiKey();
+        boolean hasApiKey = apiKey != null && !apiKey.trim().isEmpty() && !"PENDING_CONFIGURATION".equals(apiKey);
+        if (!hasApiKey || incomingMessage == null || incomingMessage.trim().isEmpty()) {
+            sendActualReply(sbn, notificationWear, fallback, matchedRule.getName());
             return;
         }
 
-        PreferencesManager preferencesManager = PreferencesManager.getPreferencesInstance(this);
-        CustomRepliesData customRepliesData = CustomRepliesData.getInstance(this); // For fallback
+        String ruleGuidance = (matchedRule.getReplyMessage() != null && !matchedRule.getReplyMessage().trim().isEmpty())
+                ? matchedRule.getReplyMessage().trim()
+                : null;
+        String historySource = matchedRule.getName() + " • " + getString(R.string.history_source_ai);
+
+        prepareAndFetchAiReply(
+                sbn,
+                notificationWear,
+                incomingMessage,
+                fallback,
+                ruleGuidance,
+                historySource,
+                false // Multi-Rule already evaluated its own cooldown/maxReplies/group filters
+        );
+    }
+
+    private String getDefaultFallbackReply(PreferencesManager preferencesManager) {
+        CustomRepliesData customRepliesData = CustomRepliesData.getInstance(this);
         String replyText = customRepliesData.getTextToSendOrElse();
         if (preferencesManager.isByokRepliesEnabled()) {
             try {
@@ -227,30 +280,134 @@ public class NotificationService extends NotificationListenerService {
                 replyText = "I am currently busy. Will reply later.";
             }
         }
-        String fallbackReplyText = replyText; // needs to be final to access in inner class hence one more variable
+        return replyText;
+    }
 
+    private void sendReply(StatusBarNotification sbn) {
+        final NotificationWear notificationWear = NotificationUtils.extractWearNotification(sbn);
+        if (notificationWear.getRemoteInputs().isEmpty()) {
+            return;
+        }
+
+        PreferencesManager preferencesManager = PreferencesManager.getPreferencesInstance(this);
+        String fallbackReplyText = getDefaultFallbackReply(preferencesManager);
         String incomingMessage = extractIncomingMessage(sbn);
 
-        // Determine if BYOK AI should be used
         boolean shouldUseAI = false;
-
         if (preferencesManager.isByokRepliesEnabled()) {
-            // BYOK: requires API key
             String apiKey = preferencesManager.getOpenAIApiKey();
             shouldUseAI = apiKey != null && !apiKey.trim().isEmpty() &&
-                         !apiKey.equals("PENDING_CONFIGURATION") &&
-                         incomingMessage != null && !incomingMessage.trim().isEmpty();
+                    !apiKey.equals("PENDING_CONFIGURATION") &&
+                    incomingMessage != null && !incomingMessage.trim().isEmpty();
             Log.d(TAG, "BYOK mode - API key configured: " + (apiKey != null && !apiKey.trim().isEmpty())
                     + ", incomingMessage present: " + (incomingMessage != null && !incomingMessage.trim().isEmpty()));
         }
 
         if (shouldUseAI) {
-            Log.d(TAG, "AI conditions met. Attempting to get AI reply.");
-            fetchAiReply(sbn, notificationWear, incomingMessage, fallbackReplyText);
+            Log.d(TAG, "AI conditions met. Checking AI policy & memory before dispatch.");
+            prepareAndFetchAiReply(
+                    sbn,
+                    notificationWear,
+                    incomingMessage,
+                    fallbackReplyText,
+                    null,
+                    getString(R.string.history_source_ai),
+                    true
+            );
         } else {
             Log.d(TAG, "AI conditions not met. Using default reply.");
             sendActualReply(sbn, notificationWear, fallbackReplyText);
         }
+    }
+
+    private void prepareAndFetchAiReply(
+            StatusBarNotification sbn,
+            NotificationWear notificationWear,
+            String incomingMessage,
+            String fallbackReplyText,
+            String ruleSpecificGuidance,
+            String historySourceLabel,
+            boolean enforceGlobalAiPolicy
+    ) {
+        getAiMemoryExecutor().execute(() -> {
+            PreferencesManager prefs = PreferencesManager.getPreferencesInstance(this);
+            String packageName = sbn.getPackageName() != null ? sbn.getPackageName() : "";
+            String senderDisplay = NotificationUtils.getTitle(sbn);
+            if (senderDisplay == null || senderDisplay.trim().isEmpty()) {
+                senderDisplay = "Unknown";
+            } else {
+                senderDisplay = senderDisplay.trim();
+            }
+            String senderKey = AiPromptAndPolicyHelper.normalizeSenderKey(senderDisplay);
+            boolean isGroup = sbn.getNotification() != null &&
+                    sbn.getNotification().extras != null &&
+                    sbn.getNotification().extras.getBoolean("android.isGroupConversation", false);
+
+            AiMemoryDao memoryDao = AiMemoryDatabase.getInstance(getApplicationContext()).aiMemoryDao();
+            long now = System.currentTimeMillis();
+
+            if (enforceGlobalAiPolicy) {
+                int cooldownSec = prefs.getAiCooldownSeconds();
+                int maxReplies = prefs.getAiMaxRepliesPerSender();
+                int windowMins = prefs.getAiFrequencyWindowMinutes();
+                String groupFilter = prefs.getAiGroupFilterMode();
+
+                Long lastReplyTime = memoryDao.getLastAiReplyTimeSync(packageName, senderKey);
+                long sinceTime = AiPromptAndPolicyHelper.computeWindowSinceMillis(windowMins, now);
+                int recentCount = (maxReplies > 0)
+                        ? memoryDao.getAiReplyCountSinceSync(packageName, senderKey, sinceTime)
+                        : 0;
+
+                AiPolicyDecision decision = AiPromptAndPolicyHelper.shouldAllowAiReply(
+                        cooldownSec,
+                        maxReplies,
+                        groupFilter,
+                        isGroup,
+                        lastReplyTime,
+                        recentCount,
+                        now
+                );
+
+                if (decision != AiPolicyDecision.ALLOWED) {
+                    Log.d(TAG, "AI reply blocked by global AI policy: " + decision + " for " + senderDisplay);
+                    if (decision != AiPolicyDecision.BLOCKED_GROUP_FILTER && !prefs.isAiSkipWhenLimitReached()) {
+                        sendActualReply(sbn, notificationWear, fallbackReplyText);
+                    }
+                    return;
+                }
+            }
+
+            boolean memoryEnabled = prefs.isAiMemoryEnabled();
+            boolean notesEnabled = prefs.isAiAutoNotesEnabled();
+
+            List<AiConversationMessage> historyAsc = new ArrayList<>();
+            if (memoryEnabled) {
+                int maxTurns = prefs.getAiMemoryMaxTurns();
+                List<AiConversationMessage> desc = memoryDao.getRecentMessagesDescSync(packageName, senderKey, maxTurns);
+                historyAsc.addAll(desc);
+                Collections.reverse(historyAsc);
+            }
+
+            List<AiNote> pendingNotes = notesEnabled
+                    ? memoryDao.getPendingNotesForSenderSync(packageName, senderDisplay, 5)
+                    : Collections.emptyList();
+
+            fetchAiReply(
+                    sbn,
+                    notificationWear,
+                    packageName,
+                    senderKey,
+                    senderDisplay,
+                    incomingMessage,
+                    historyAsc,
+                    pendingNotes,
+                    memoryEnabled,
+                    notesEnabled,
+                    ruleSpecificGuidance,
+                    historySourceLabel,
+                    fallbackReplyText
+            );
+        });
     }
 
     private String getDefaultModelForProvider(String provider) {
@@ -282,16 +439,29 @@ public class NotificationService extends NotificationListenerService {
         return msg;
     }
 
-    private void fetchAiReply(StatusBarNotification sbn, NotificationWear notificationWear, String incomingMessage, String fallbackReplyText) {
+    private void fetchAiReply(
+            StatusBarNotification sbn,
+            NotificationWear notificationWear,
+            String packageName,
+            String senderKey,
+            String senderDisplay,
+            String incomingMessage,
+            List<AiConversationMessage> historyAsc,
+            List<AiNote> pendingNotes,
+            boolean memoryEnabled,
+            boolean notesEnabled,
+            String ruleSpecificGuidance,
+            String historySourceLabel,
+            String fallbackReplyText
+    ) {
         PreferencesManager prefs = PreferencesManager.getPreferencesInstance(this);
 
-        if (!prefs.isByokRepliesEnabled()) {
+        if (ruleSpecificGuidance == null && !prefs.isByokRepliesEnabled()) {
             sendActualReply(sbn, notificationWear, fallbackReplyText);
             return;
         }
 
-        // BYOK: Use user's own API key with configured provider
-        Log.d(TAG, "Using BYOK (client-based) backend");
+        Log.d(TAG, "Using BYOK backend with memoryTurns=" + historyAsc.size() + ", notesEnabled=" + notesEnabled);
         String apiKey = prefs.getOpenAIApiKey();
         if (apiKey != null) apiKey = apiKey.trim();
         String provider = prefs.getOpenApiSource();
@@ -301,14 +471,23 @@ public class NotificationService extends NotificationListenerService {
             provider = provider.trim();
         }
 
-        // BYOK flow continues here
         String model = prefs.getSelectedOpenAIModel();
-        String systemPrompt = prefs.getOpenAICustomPrompt();
-        if (systemPrompt == null || systemPrompt.trim().isEmpty()) systemPrompt = DEFAULT_LLM_PROMPT;
+        String basePrompt = prefs.getOpenAICustomPrompt();
+        if (basePrompt == null || basePrompt.trim().isEmpty()) basePrompt = DEFAULT_LLM_PROMPT;
         if (model == null || model.trim().isEmpty()) {
             model = getDefaultModelForProvider(provider);
         }
         model = model.trim();
+
+        String systemPrompt = AiPromptAndPolicyHelper.buildAugmentedSystemPrompt(
+                basePrompt,
+                notesEnabled,
+                memoryEnabled,
+                senderDisplay,
+                pendingNotes,
+                ruleSpecificGuidance,
+                System.currentTimeMillis()
+        );
 
         String baseUrl = null;
         for (Map.Entry<String, String> entry : Constants.INSTANCE.getPROVIDER_URLS().entrySet()) {
@@ -326,28 +505,103 @@ public class NotificationService extends NotificationListenerService {
         if (!baseUrl.endsWith("/")) baseUrl += "/";
 
         OpenAIService service = RetrofitInstance.getOpenAIRetrofitInstance(baseUrl).create(OpenAIService.class);
+        int maxTurnsToKeep = Math.max(20, prefs.getAiMemoryMaxTurns() * 2);
 
         if ("Claude".equalsIgnoreCase(provider)) {
-            fetchClaudeReply(prefs, service, baseUrl, apiKey, model, systemPrompt, incomingMessage, sbn, notificationWear, fallbackReplyText);
+            fetchClaudeReply(
+                    prefs, service, baseUrl, apiKey, model, systemPrompt,
+                    packageName, senderKey, senderDisplay, incomingMessage, historyAsc,
+                    memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
+                    sbn, notificationWear, fallbackReplyText
+            );
         } else if ("Gemini".equalsIgnoreCase(provider)) {
-            fetchGeminiReply(prefs, service, baseUrl, apiKey, model, systemPrompt, incomingMessage, sbn, notificationWear, fallbackReplyText);
+            fetchGeminiReply(
+                    prefs, service, baseUrl, apiKey, model, systemPrompt,
+                    packageName, senderKey, senderDisplay, incomingMessage, historyAsc,
+                    memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
+                    sbn, notificationWear, fallbackReplyText
+            );
         } else {
-            // OpenAI, Grok, DeepSeek, Mistral, Custom
-            fetchOpenAiCompatibleReply(prefs, service, baseUrl, apiKey, model, systemPrompt, incomingMessage, sbn, notificationWear, fallbackReplyText);
+            fetchOpenAiCompatibleReply(
+                    prefs, service, baseUrl, apiKey, model, systemPrompt,
+                    packageName, senderKey, senderDisplay, incomingMessage, historyAsc,
+                    memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
+                    sbn, notificationWear, fallbackReplyText
+            );
         }
     }
 
-    private void fetchClaudeReply(PreferencesManager prefs, OpenAIService service, String baseUrl, String apiKey, String model, String systemPrompt, String incomingMessage, StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText) {
+    private void handleSuccessfulAiReply(
+            PreferencesManager prefs,
+            StatusBarNotification sbn,
+            NotificationWear notificationWear,
+            String packageName,
+            String senderKey,
+            String senderDisplay,
+            String incomingMessage,
+            String rawAiReply,
+            boolean memoryEnabled,
+            boolean notesEnabled,
+            int maxTurnsToKeep,
+            String historySourceLabel
+    ) {
+        prefs.clearOpenAILastPersistentError();
+
+        ParsedAiResponse parsed = notesEnabled
+                ? AiPromptAndPolicyHelper.parseAndStripNotes(rawAiReply)
+                : new ParsedAiResponse(rawAiReply.trim(), Collections.emptyList());
+
+        String finalReply = parsed.getCleanReply();
+        List<String> extractedNotes = parsed.getExtractedNotes();
+
+        sendActualReply(sbn, notificationWear, finalReply, historySourceLabel);
+
+        getAiMemoryExecutor().execute(() -> {
+            try {
+                AiMemoryDao dao = AiMemoryDatabase.getInstance(getApplicationContext()).aiMemoryDao();
+                long now = System.currentTimeMillis();
+                dao.insertReplyLogSync(new AiReplyLog(0L, packageName, senderKey, now));
+
+                if (memoryEnabled) {
+                    dao.insertConversationMessageSync(
+                            new AiConversationMessage(0L, packageName, senderKey, senderDisplay, "user", incomingMessage, now)
+                    );
+                    dao.insertConversationMessageSync(
+                            new AiConversationMessage(0L, packageName, senderKey, senderDisplay, "assistant", finalReply, now + 1L)
+                    );
+                    dao.trimConversationMessagesSync(packageName, senderKey, maxTurnsToKeep);
+                }
+
+                if (notesEnabled && !extractedNotes.isEmpty()) {
+                    for (int i = 0; i < extractedNotes.size(); i++) {
+                        String noteText = extractedNotes.get(i);
+                        dao.insertNoteSync(
+                                new AiNote(0L, senderDisplay, packageName, noteText, incomingMessage, now + i, false)
+                        );
+                    }
+                    Log.i(TAG, "Saved " + extractedNotes.size() + " AI note(s) from " + senderDisplay);
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Failed persisting AI memory/notes", e);
+            }
+        });
+    }
+
+    private void fetchClaudeReply(
+            PreferencesManager prefs, OpenAIService service, String baseUrl, String apiKey,
+            String model, String systemPrompt,
+            String packageName, String senderKey, String senderDisplay,
+            String incomingMessage, List<AiConversationMessage> historyAsc,
+            boolean memoryEnabled, boolean notesEnabled, int maxTurnsToKeep,
+            String historySourceLabel,
+            StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText
+    ) {
         JsonObject requestBody = new JsonObject();
         requestBody.addProperty("model", model);
         requestBody.addProperty("max_tokens", 1024);
         requestBody.addProperty("system", systemPrompt);
 
-        JsonArray messages = new JsonArray();
-        JsonObject userMessage = new JsonObject();
-        userMessage.addProperty("role", "user");
-        userMessage.addProperty("content", incomingMessage);
-        messages.add(userMessage);
+        JsonArray messages = AiPromptAndPolicyHelper.buildClaudeMessagesJson(historyAsc, incomingMessage);
         requestBody.add("messages", messages);
 
         Map<String, String> headers = new HashMap<>();
@@ -379,8 +633,10 @@ public class NotificationService extends NotificationListenerService {
                             }
                             String reply = sb.toString().trim();
                             if (!reply.isEmpty()) {
-                                prefs.clearOpenAILastPersistentError();
-                                sendActualReply(sbn, notificationWear, reply, getString(R.string.history_source_ai));
+                                handleSuccessfulAiReply(
+                                        prefs, sbn, notificationWear, packageName, senderKey, senderDisplay,
+                                        incomingMessage, reply, memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel
+                                );
                                 return;
                             }
                         }
@@ -403,18 +659,15 @@ public class NotificationService extends NotificationListenerService {
         });
     }
 
-    private void fetchGeminiReply(PreferencesManager prefs, OpenAIService service, String baseUrl, String apiKey, String model, String systemPrompt, String incomingMessage, StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText) {
-        JsonObject requestBody = new JsonObject();
-        JsonArray contents = new JsonArray();
-        JsonObject contentObj = new JsonObject();
-        JsonArray parts = new JsonArray();
-        JsonObject part = new JsonObject();
-        part.addProperty("text", systemPrompt + "\n\nUser: " + incomingMessage);
-        parts.add(part);
-        contentObj.add("parts", parts);
-        contents.add(contentObj);
-        requestBody.add("contents", contents);
-
+    private void fetchGeminiReply(
+            PreferencesManager prefs, OpenAIService service, String baseUrl, String apiKey,
+            String model, String systemPrompt,
+            String packageName, String senderKey, String senderDisplay,
+            String incomingMessage, List<AiConversationMessage> historyAsc,
+            boolean memoryEnabled, boolean notesEnabled, int maxTurnsToKeep,
+            String historySourceLabel,
+            StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText
+    ) {
         String cleanModel = model.startsWith("models/") ? model.substring("models/".length()) : model;
         String url;
         if (baseUrl.endsWith(":generateContent/")) {
@@ -424,6 +677,31 @@ public class NotificationService extends NotificationListenerService {
                     ? baseUrl + "models/" + cleanModel + ":generateContent"
                     : baseUrl + "v1beta/models/" + cleanModel + ":generateContent";
         }
+
+        JsonObject requestBody = new JsonObject();
+        JsonArray contents;
+        if (url.contains("/v1beta/") || url.contains("/v1alpha/")) {
+            JsonObject sysObj = new JsonObject();
+            JsonArray sysParts = new JsonArray();
+            JsonObject sysText = new JsonObject();
+            sysText.addProperty("text", systemPrompt);
+            sysParts.add(sysText);
+            sysObj.add("parts", sysParts);
+            requestBody.add("system_instruction", sysObj);
+            contents = AiPromptAndPolicyHelper.buildGeminiContentsJson(historyAsc, incomingMessage);
+        } else {
+            // Fallback for plain /v1/ endpoints without system_instruction
+            contents = AiPromptAndPolicyHelper.buildGeminiContentsJson(historyAsc, incomingMessage);
+            if (contents.size() > 0) {
+                JsonObject first = contents.get(0).getAsJsonObject();
+                JsonArray parts = first.getAsJsonArray("parts");
+                if (parts != null && parts.size() > 0) {
+                    String orig = parts.get(0).getAsJsonObject().get("text").getAsString();
+                    parts.get(0).getAsJsonObject().addProperty("text", systemPrompt + "\n\n" + orig);
+                }
+            }
+        }
+        requestBody.add("contents", contents);
 
         service.getGeminiCompletion(url, apiKey, requestBody).enqueue(new Callback<JsonObject>() {
             @Override
@@ -454,8 +732,10 @@ public class NotificationService extends NotificationListenerService {
                                     reply = fallbackPartText.trim();
                                 }
                                 if (!reply.isEmpty()) {
-                                    prefs.clearOpenAILastPersistentError();
-                                    sendActualReply(sbn, notificationWear, reply, getString(R.string.history_source_ai));
+                                    handleSuccessfulAiReply(
+                                            prefs, sbn, notificationWear, packageName, senderKey, senderDisplay,
+                                            incomingMessage, reply, memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel
+                                    );
                                     return;
                                 }
                             }
@@ -479,10 +759,16 @@ public class NotificationService extends NotificationListenerService {
         });
     }
 
-    private void fetchOpenAiCompatibleReply(PreferencesManager prefs, OpenAIService service, String baseUrl, String apiKey, String model, String systemPrompt, String incomingMessage, StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText) {
-        List<Message> messages = new ArrayList<>();
-        messages.add(new Message("system", systemPrompt));
-        messages.add(new Message("user", incomingMessage));
+    private void fetchOpenAiCompatibleReply(
+            PreferencesManager prefs, OpenAIService service, String baseUrl, String apiKey,
+            String model, String systemPrompt,
+            String packageName, String senderKey, String senderDisplay,
+            String incomingMessage, List<AiConversationMessage> historyAsc,
+            boolean memoryEnabled, boolean notesEnabled, int maxTurnsToKeep,
+            String historySourceLabel,
+            StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText
+    ) {
+        List<Message> messages = AiPromptAndPolicyHelper.buildOpenAiMessages(systemPrompt, historyAsc, incomingMessage);
 
         OpenAIRequest request = new OpenAIRequest(model, messages);
         String bearerToken = "Bearer " + apiKey;
@@ -506,15 +792,16 @@ public class NotificationService extends NotificationListenerService {
                     String aiReply = response.body().getChoices().get(0).getMessage().getContent().trim();
                     if (!aiReply.isEmpty()) {
                         Log.i(TAG, "OpenAI/Compatible successful response: " + aiReply);
-                        prefs.clearOpenAILastPersistentError();
-                        sendActualReply(sbn, notificationWear, aiReply, getString(R.string.history_source_ai));
+                        handleSuccessfulAiReply(
+                                prefs, sbn, notificationWear, packageName, senderKey, senderDisplay,
+                                incomingMessage, aiReply, memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel
+                        );
                         return;
                     }
                 }
                 String err = response.isSuccessful() ? "Empty AI response" : extractErrorSnippet(response);
                 Log.e(TAG, "OpenAI/Compatible API failed: " + err);
                 recordAiError(prefs, err);
-                // Fallback to default reply
                 sendActualReply(sbn, notificationWear, fallbackReplyText);
             }
 
@@ -528,14 +815,9 @@ public class NotificationService extends NotificationListenerService {
     }
 
     private boolean canPurgeMessages() {
-        //Added L to avoid numeric overflow expression
-        //https://stackoverflow.com/questions/43801874/numeric-overflow-in-expression-manipulating-timestamps
         long daysBeforePurgeInMS = 30 * 24 * 60 * 60 * 1000L;
         return (System.currentTimeMillis() - PreferencesManager.getPreferencesInstance(this).getLastPurgedTime()) > daysBeforePurgeInMS;
     }
-
-    // Decision logic (canReply, shouldReply, isSupportedPackage, canSendReplyNow,
-    // isGroupMessageAndReplyAllowed, isServiceEnabled) is in NotificationReplyDecider.
 
     @Override
     public void onListenerDisconnected() {
@@ -557,6 +839,10 @@ public class NotificationService extends NotificationListenerService {
         if (ruleNotificationProcessor != null) {
             ruleNotificationProcessor.shutdown();
             ruleNotificationProcessor = null;
+        }
+        if (aiMemoryExecutor != null) {
+            aiMemoryExecutor.shutdownNow();
+            aiMemoryExecutor = null;
         }
     }
 

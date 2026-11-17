@@ -65,7 +65,7 @@ class RuleEvaluator(
             ) continue
             if (!passesCooldown(rule, context.packageName, sender, nowMillis)) continue
             if (!passesFrequencyLimit(rule, context.packageName, sender, nowMillis)) continue
-            if (rule.replyMessage.isBlank()) continue
+            if (!rule.useAiReply && rule.replyMessage.isBlank()) continue
 
             return RuleEvaluationResult(rule = rule, replyText = rule.replyMessage)
         }

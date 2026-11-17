@@ -13,15 +13,22 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import com.google.android.material.appbar.MaterialToolbar
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.textfield.TextInputEditText
 import com.parishod.watomatic.R
 import com.parishod.watomatic.activity.BaseActivity
+import com.parishod.watomatic.activity.notes.AiNotesActivity
 import com.parishod.watomatic.model.CustomRepliesData
+import com.parishod.watomatic.model.ai.AiMemoryDatabase
 import com.parishod.watomatic.model.preferences.PreferencesManager
 import com.parishod.watomatic.utils.UnsavedChangesDialog
 import com.parishod.watomatic.viewmodel.SwipeToKillAppDetectViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class CustomReplyEditorActivity : BaseActivity() {
     companion object {
@@ -40,6 +47,8 @@ class CustomReplyEditorActivity : BaseActivity() {
     private var btnOtherAiEdit: android.widget.ImageView? = null
     private var otherAiCheckIcon: android.widget.ImageView? = null
     private var otherAiExpandedContent: android.view.View? = null
+    private var btnOpenAiNotes: MaterialButton? = null
+    private var btnOpenAiRulesMemory: MaterialButton? = null
 
     private var selectedReplyMethod = REPLY_METHOD_MANUAL
     private var initialSelectedReplyMethod = REPLY_METHOD_MANUAL
@@ -116,6 +125,16 @@ class CustomReplyEditorActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         updateCardExpansionState(selectedReplyMethod)
+        refreshPendingNotesBadge()
+    }
+
+    private fun refreshPendingNotesBadge() {
+        lifecycleScope.launch {
+            val count = withContext(Dispatchers.IO) {
+                AiMemoryDatabase.getInstance(applicationContext).aiMemoryDao().getPendingNoteCountSync()
+            }
+            btnOpenAiNotes?.text = getString(R.string.ai_view_notes_btn, count)
+        }
     }
 
     private fun initializeViews() {
@@ -128,6 +147,8 @@ class CustomReplyEditorActivity : BaseActivity() {
         btnOtherAiEdit = findViewById(R.id.btn_other_ai_edit)
         otherAiCheckIcon = findViewById(R.id.other_ai_check_icon)
         otherAiExpandedContent = findViewById(R.id.other_ai_expanded_content)
+        btnOpenAiNotes = findViewById(R.id.btn_open_ai_notes)
+        btnOpenAiRulesMemory = findViewById(R.id.btn_open_ai_rules_memory)
     }
 
     private fun handleDeepLink() {
@@ -162,6 +183,15 @@ class CustomReplyEditorActivity : BaseActivity() {
 
         // Other AI Settings Icon - Navigate to configuration
         btnOtherAiEdit?.setOnClickListener {
+            val intent = Intent(this, OtherAiConfigurationActivity::class.java)
+            otherAiConfigLauncher.launch(intent)
+        }
+
+        btnOpenAiNotes?.setOnClickListener {
+            startActivity(Intent(this, AiNotesActivity::class.java))
+        }
+
+        btnOpenAiRulesMemory?.setOnClickListener {
             val intent = Intent(this, OtherAiConfigurationActivity::class.java)
             otherAiConfigLauncher.launch(intent)
         }

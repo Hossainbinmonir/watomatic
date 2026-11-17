@@ -19,10 +19,18 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.chip.Chip
+import com.google.android.material.chip.ChipGroup
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import com.google.gson.JsonElement
 import com.parishod.watomatic.R
+import com.parishod.watomatic.activity.notes.AiNotesActivity
+import com.parishod.watomatic.model.ai.AiMemoryDatabase
 import com.parishod.watomatic.model.preferences.PreferencesManager
 import com.parishod.watomatic.model.utils.Constants
 import com.parishod.watomatic.model.utils.Constants.CUSTOM_AI_PROVIDER_NAME
@@ -31,6 +39,9 @@ import com.parishod.watomatic.network.OpenAIService
 import com.parishod.watomatic.network.RetrofitInstance
 import com.parishod.watomatic.network.model.openai.OpenAIModelsResponse
 import com.parishod.watomatic.utils.UnsavedChangesDialog
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
@@ -46,6 +57,22 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
     private lateinit var modelFetchProgress: ProgressBar
     private lateinit var modelFetchStatus: TextView
     private lateinit var btnRefreshModels: View
+
+    // Memory, Smart Notes & AI Rules controls
+    private lateinit var switchAiMemory: MaterialSwitch
+    private lateinit var actvMemoryDepth: AutoCompleteTextView
+    private lateinit var switchAiAutoNotes: MaterialSwitch
+    private lateinit var btnViewAiNotes: MaterialButton
+    private lateinit var btnClearAiMemory: MaterialButton
+    private lateinit var etAiCooldownSeconds: TextInputEditText
+    private lateinit var chipGroupCooldownPresets: ChipGroup
+    private lateinit var etAiMaxReplies: TextInputEditText
+    private lateinit var actvAiFrequencyWindow: AutoCompleteTextView
+    private lateinit var chipGroupAiConversationType: ChipGroup
+    private lateinit var chipGroupAiLimitAction: ChipGroup
+
+    private var selectedMemoryDepth: Int = 12
+    private var selectedAiFrequencyWindowMinutes: Int = 1440
 
     private val providers = listOf("OpenAI", "Claude", "Grok", "Gemini", "DeepSeek", "Mistral", CUSTOM_AI_PROVIDER_NAME)
     private val providerUrls = Constants.PROVIDER_URLS
@@ -90,6 +117,14 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
     private var initialBaseUrl: String = ""
     private var initialModel: String = ""
     private var initialSystemPrompt: String = ""
+    private var initialMemoryEnabled: Boolean = true
+    private var initialMemoryDepth: Int = 12
+    private var initialAutoNotesEnabled: Boolean = true
+    private var initialCooldownText: String = "0"
+    private var initialMaxRepliesText: String = "0"
+    private var initialFrequencyWindow: Int = 1440
+    private var initialGroupFilterMode: String = "DIRECT_ONLY"
+    private var initialSkipOnLimit: Boolean = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -119,15 +154,34 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         modelFetchStatus = findViewById(R.id.tv_model_fetch_status)
         btnRefreshModels = findViewById(R.id.btn_refresh_models)
 
+        switchAiMemory = findViewById(R.id.switch_ai_memory_enabled)
+        actvMemoryDepth = findViewById(R.id.actv_ai_memory_depth)
+        switchAiAutoNotes = findViewById(R.id.switch_ai_auto_notes_enabled)
+        btnViewAiNotes = findViewById(R.id.btn_view_ai_notes)
+        btnClearAiMemory = findViewById(R.id.btn_clear_ai_memory)
+        etAiCooldownSeconds = findViewById(R.id.et_ai_cooldown_seconds)
+        chipGroupCooldownPresets = findViewById(R.id.chip_group_ai_cooldown_presets)
+        etAiMaxReplies = findViewById(R.id.et_ai_max_replies)
+        actvAiFrequencyWindow = findViewById(R.id.actv_ai_frequency_window)
+        chipGroupAiConversationType = findViewById(R.id.chip_group_ai_conversation_type)
+        chipGroupAiLimitAction = findViewById(R.id.chip_group_ai_limit_action)
+
         preferencesManager = PreferencesManager.getPreferencesInstance(this)
 
         setupProviderDropdown()
+        setupMemoryAndRulesDropdowns()
         prefillData()
         setupListeners()
+        refreshMemoryAndNotesCounters()
 
         findViewById<View>(R.id.saveConfigBtn).setOnClickListener {
             saveConfiguration()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshMemoryAndNotesCounters()
     }
 
     private fun normalizeProviderName(raw: String?): String {
@@ -162,11 +216,54 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
             systemPromptInput.setText(savedPrompt)
         }
 
+        // Prefill Memory, Smart Notes & AI Rules
+        val memEnabled = preferencesManager.isAiMemoryEnabled
+        switchAiMemory.isChecked = memEnabled
+        findViewById<View>(R.id.til_ai_memory_depth).visibility = if (memEnabled) View.VISIBLE else View.GONE
+
+        selectedMemoryDepth = preferencesManager.aiMemoryMaxTurns
+        actvMemoryDepth.setText(getMemoryDepthLabel(selectedMemoryDepth), false)
+
+        val autoNotesEnabled = preferencesManager.isAiAutoNotesEnabled
+        switchAiAutoNotes.isChecked = autoNotesEnabled
+
+        val cooldownSec = preferencesManager.aiCooldownSeconds
+        etAiCooldownSeconds.setText(cooldownSec.toString())
+        syncCooldownPresetChip(cooldownSec)
+
+        val maxReplies = preferencesManager.aiMaxRepliesPerSender
+        etAiMaxReplies.setText(maxReplies.toString())
+
+        selectedAiFrequencyWindowMinutes = preferencesManager.aiFrequencyWindowMinutes
+        actvAiFrequencyWindow.setText(getFrequencyWindowLabel(selectedAiFrequencyWindowMinutes), false)
+
+        val groupMode = preferencesManager.aiGroupFilterMode ?: "DIRECT_ONLY"
+        when (groupMode) {
+            "BOTH" -> findViewById<Chip>(R.id.chip_ai_conv_both).isChecked = true
+            "GROUP_ONLY" -> findViewById<Chip>(R.id.chip_ai_conv_group).isChecked = true
+            else -> findViewById<Chip>(R.id.chip_ai_conv_direct).isChecked = true
+        }
+
+        val skipOnLimit = preferencesManager.isAiSkipWhenLimitReached
+        if (skipOnLimit) {
+            findViewById<Chip>(R.id.chip_ai_limit_skip).isChecked = true
+        } else {
+            findViewById<Chip>(R.id.chip_ai_limit_fallback).isChecked = true
+        }
+
         initialProvider = providerInput.text.toString()
         initialApiKey = apiKeyInput.text.toString()
         initialBaseUrl = baseUrlInput.text.toString()
         initialModel = modelInput.text.toString()
         initialSystemPrompt = systemPromptInput.text.toString()
+        initialMemoryEnabled = memEnabled
+        initialMemoryDepth = selectedMemoryDepth
+        initialAutoNotesEnabled = autoNotesEnabled
+        initialCooldownText = cooldownSec.toString()
+        initialMaxRepliesText = maxReplies.toString()
+        initialFrequencyWindow = selectedAiFrequencyWindowMinutes
+        initialGroupFilterMode = groupMode
+        initialSkipOnLimit = skipOnLimit
 
         applyRecommendedModels(providerInput.text.toString(), updateHint = true)
         isPopulating = false
@@ -177,6 +274,74 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         providerInput.setAdapter(adapter)
         if (providerInput.text.isEmpty()) {
             providerInput.setText(providers[0], false)
+        }
+    }
+
+    private fun setupMemoryAndRulesDropdowns() {
+        val depthOptions = listOf(
+            6 to getString(R.string.ai_memory_depth_6),
+            12 to getString(R.string.ai_memory_depth_12),
+            20 to getString(R.string.ai_memory_depth_20),
+            30 to getString(R.string.ai_memory_depth_30)
+        )
+        actvMemoryDepth.setAdapter(NoFilterArrayAdapter(this, depthOptions.map { it.second }))
+        actvMemoryDepth.setOnItemClickListener { _, _, position, _ ->
+            selectedMemoryDepth = depthOptions[position].first
+        }
+
+        val windowOptions = listOf(
+            60 to getString(R.string.window_hourly),
+            1440 to getString(R.string.window_daily),
+            0 to getString(R.string.window_all_time)
+        )
+        actvAiFrequencyWindow.setAdapter(NoFilterArrayAdapter(this, windowOptions.map { it.second }))
+        actvAiFrequencyWindow.setOnItemClickListener { _, _, position, _ ->
+            selectedAiFrequencyWindowMinutes = windowOptions[position].first
+        }
+    }
+
+    private fun getMemoryDepthLabel(depth: Int): String = when {
+        depth <= 6 -> getString(R.string.ai_memory_depth_6)
+        depth <= 12 -> getString(R.string.ai_memory_depth_12)
+        depth <= 20 -> getString(R.string.ai_memory_depth_20)
+        else -> getString(R.string.ai_memory_depth_30)
+    }
+
+    private fun getFrequencyWindowLabel(minutes: Int): String = when (minutes) {
+        60 -> getString(R.string.window_hourly)
+        0 -> getString(R.string.window_all_time)
+        else -> getString(R.string.window_daily)
+    }
+
+    private fun syncCooldownPresetChip(seconds: Int) {
+        val targetId = when (seconds) {
+            0 -> R.id.chip_ai_cd_off
+            30 -> R.id.chip_ai_cd_30s
+            60 -> R.id.chip_ai_cd_1m
+            300 -> R.id.chip_ai_cd_5m
+            1800 -> R.id.chip_ai_cd_30m
+            else -> View.NO_ID
+        }
+        if (targetId != View.NO_ID) {
+            findViewById<Chip>(targetId).isChecked = true
+        } else {
+            chipGroupCooldownPresets.clearCheck()
+        }
+    }
+
+    private fun refreshMemoryAndNotesCounters() {
+        lifecycleScope.launch {
+            val (pendingNotes, msgCount) = withContext(Dispatchers.IO) {
+                val dao = AiMemoryDatabase.getInstance(applicationContext).aiMemoryDao()
+                dao.getPendingNoteCountSync() to dao.getConversationMessageCountSync()
+            }
+            btnViewAiNotes.text = getString(R.string.ai_view_notes_btn, pendingNotes)
+            btnClearAiMemory.text = if (msgCount > 0) {
+                getString(R.string.ai_clear_memory_count_btn, msgCount)
+            } else {
+                getString(R.string.ai_clear_memory_btn)
+            }
+            btnClearAiMemory.isEnabled = msgCount > 0
         }
     }
 
@@ -248,6 +413,62 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
             }
             false
         }
+
+        switchAiMemory.setOnCheckedChangeListener { _, isChecked ->
+            findViewById<View>(R.id.til_ai_memory_depth).visibility = if (isChecked) View.VISIBLE else View.GONE
+        }
+
+        btnViewAiNotes.setOnClickListener {
+            startActivity(Intent(this, AiNotesActivity::class.java))
+        }
+
+        btnClearAiMemory.setOnClickListener {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.ai_clear_memory_title)
+                .setMessage(R.string.ai_clear_memory_message)
+                .setPositiveButton(R.string.ai_clear_memory_btn) { _, _ ->
+                    lifecycleScope.launch {
+                        withContext(Dispatchers.IO) {
+                            AiMemoryDatabase.getInstance(applicationContext).aiMemoryDao()
+                                .clearAllConversationMessages()
+                        }
+                        refreshMemoryAndNotesCounters()
+                        Toast.makeText(this@OtherAiConfigurationActivity, R.string.ai_memory_cleared_toast, Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+
+        chipGroupCooldownPresets.setOnCheckedStateChangeListener { _, checkedIds ->
+            if (isPopulating) return@setOnCheckedStateChangeListener
+            val presetSeconds = when (checkedIds.firstOrNull()) {
+                R.id.chip_ai_cd_off -> 0
+                R.id.chip_ai_cd_30s -> 30
+                R.id.chip_ai_cd_1m -> 60
+                R.id.chip_ai_cd_5m -> 300
+                R.id.chip_ai_cd_30m -> 1800
+                else -> null
+            }
+            if (presetSeconds != null) {
+                isPopulating = true
+                etAiCooldownSeconds.setText(presetSeconds.toString())
+                etAiCooldownSeconds.setSelection(etAiCooldownSeconds.text?.length ?: 0)
+                isPopulating = false
+            }
+        }
+
+        etAiCooldownSeconds.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(s: Editable?) {
+                if (isPopulating) return
+                val sec = s?.toString()?.toIntOrNull() ?: -1
+                isPopulating = true
+                syncCooldownPresetChip(sec)
+                isPopulating = false
+            }
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+        })
     }
 
     private fun handleModelDropdownInteraction() {
@@ -445,6 +666,22 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
             return
         }
 
+        val cooldownSec = (etAiCooldownSeconds.text?.toString()?.toIntOrNull() ?: 0).coerceIn(0, 86400)
+        val maxReplies = (etAiMaxReplies.text?.toString()?.toIntOrNull() ?: 0).coerceIn(0, 1000)
+        val groupFilterMode = getSelectedGroupFilterMode()
+        val skipOnLimit = chipGroupAiLimitAction.checkedChipId != R.id.chip_ai_limit_fallback
+        val memoryEnabled = switchAiMemory.isChecked
+        val autoNotesEnabled = switchAiAutoNotes.isChecked
+
+        preferencesManager.isAiMemoryEnabled = memoryEnabled
+        preferencesManager.aiMemoryMaxTurns = selectedMemoryDepth
+        preferencesManager.isAiAutoNotesEnabled = autoNotesEnabled
+        preferencesManager.aiCooldownSeconds = cooldownSec
+        preferencesManager.aiMaxRepliesPerSender = maxReplies
+        preferencesManager.aiFrequencyWindowMinutes = selectedAiFrequencyWindowMinutes
+        preferencesManager.aiGroupFilterMode = groupFilterMode
+        preferencesManager.isAiSkipWhenLimitReached = skipOnLimit
+
         val resultIntent = Intent()
         resultIntent.putExtra("provider", provider)
         resultIntent.putExtra("apiKey", apiKey)
@@ -459,9 +696,23 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         initialModel = model
         initialSystemPrompt = systemPromptInput.text.toString()
         initialBaseUrl = if (provider == CUSTOM_AI_PROVIDER_NAME) baseUrl else ""
+        initialMemoryEnabled = memoryEnabled
+        initialMemoryDepth = selectedMemoryDepth
+        initialAutoNotesEnabled = autoNotesEnabled
+        initialCooldownText = etAiCooldownSeconds.text?.toString().orEmpty()
+        initialMaxRepliesText = etAiMaxReplies.text?.toString().orEmpty()
+        initialFrequencyWindow = selectedAiFrequencyWindowMinutes
+        initialGroupFilterMode = groupFilterMode
+        initialSkipOnLimit = skipOnLimit
 
         setResult(RESULT_OK, resultIntent)
         finish()
+    }
+
+    private fun getSelectedGroupFilterMode(): String = when (chipGroupAiConversationType.checkedChipId) {
+        R.id.chip_ai_conv_both -> "BOTH"
+        R.id.chip_ai_conv_group -> "GROUP_ONLY"
+        else -> "DIRECT_ONLY"
     }
 
     private fun hasUnsavedChanges(): Boolean {
@@ -470,12 +721,21 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         val currentBaseUrl = baseUrlInput.text.toString()
         val currentModel = modelInput.text.toString()
         val currentSystemPrompt = systemPromptInput.text.toString()
+        val currentSkipOnLimit = chipGroupAiLimitAction.checkedChipId != R.id.chip_ai_limit_fallback
 
         return currentProvider != initialProvider ||
             currentApiKey != initialApiKey ||
             currentBaseUrl != initialBaseUrl ||
             currentModel != initialModel ||
-            currentSystemPrompt != initialSystemPrompt
+            currentSystemPrompt != initialSystemPrompt ||
+            switchAiMemory.isChecked != initialMemoryEnabled ||
+            selectedMemoryDepth != initialMemoryDepth ||
+            switchAiAutoNotes.isChecked != initialAutoNotesEnabled ||
+            etAiCooldownSeconds.text.toString() != initialCooldownText ||
+            etAiMaxReplies.text.toString() != initialMaxRepliesText ||
+            selectedAiFrequencyWindowMinutes != initialFrequencyWindow ||
+            getSelectedGroupFilterMode() != initialGroupFilterMode ||
+            currentSkipOnLimit != initialSkipOnLimit
     }
 
     private fun showUnsavedChangesDialog() {

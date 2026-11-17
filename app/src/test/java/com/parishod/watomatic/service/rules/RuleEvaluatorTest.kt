@@ -75,6 +75,7 @@ class RuleEvaluatorTest {
         matchType: MatchType = MatchType.CONTAINS,
         keywords: List<String> = listOf("hello"),
         reply: String = "Auto reply",
+        useAiReply: Boolean = false,
         priority: Int = 10,
         cooldownSeconds: Int = 0,
         maxRepliesPerSender: Int = 0,
@@ -95,6 +96,7 @@ class RuleEvaluatorTest {
         keywords = keywords,
         isCaseSensitive = false,
         replyMessage = reply,
+        useAiReply = useAiReply,
         priority = priority,
         replyDelaySeconds = 0,
         cooldownSeconds = cooldownSeconds,
@@ -325,5 +327,27 @@ class RuleEvaluatorTest {
                 context(notificationKey = "notif-99", messageTimestamp = 5555L, messageText = "hello")
             )
         )
+    }
+
+    @Test
+    fun `ai powered rule matches even when static replyMessage is blank`() {
+        val aiRule = baseRule(
+            id = 55L,
+            keywords = listOf("booking"),
+            reply = "",
+            useAiReply = true
+        )
+        val staticBlankRule = baseRule(
+            id = 56L,
+            keywords = listOf("booking"),
+            reply = "",
+            useAiReply = false
+        )
+
+        assertNull(evaluator.evaluate(listOf(staticBlankRule), context(messageText = "I want a booking")))
+        val matched = evaluator.evaluate(listOf(aiRule), context(messageText = "I want a booking"))
+        assertNotNull(matched)
+        assertEquals(55L, matched?.rule?.id)
+        assertEquals(true, matched?.rule?.useAiReply)
     }
 }

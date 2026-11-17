@@ -33,6 +33,9 @@ data class AutoReplyRule(
     @ColumnInfo(name = "reply_message")
     val replyMessage: String,
 
+    @ColumnInfo(name = "use_ai_reply", defaultValue = "0")
+    val useAiReply: Boolean = false,
+
     @ColumnInfo(name = "priority")
     val priority: Int = 10,
 

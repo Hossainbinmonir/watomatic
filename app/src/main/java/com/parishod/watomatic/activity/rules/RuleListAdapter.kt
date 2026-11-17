@@ -48,6 +48,7 @@ class RuleListAdapter(
         private val tvStatusBadge: TextView = itemView.findViewById(R.id.tv_rule_status_badge)
         private val tvPriorityBadge: TextView = itemView.findViewById(R.id.tv_rule_priority_badge)
         private val tvCategoryBadge: TextView = itemView.findViewById(R.id.tv_rule_category_badge)
+        private val tvAiBadge: TextView = itemView.findViewById(R.id.tv_rule_ai_badge)
         private val tvName: TextView = itemView.findViewById(R.id.tv_rule_name)
         private val switchEnabled: MaterialSwitch = itemView.findViewById(R.id.switch_rule_enabled)
         private val tvApps: TextView = itemView.findViewById(R.id.tv_rule_apps)
@@ -92,9 +93,17 @@ class RuleListAdapter(
                 listener.onToggleEnabled(rule, isChecked)
             }
 
+            tvAiBadge.visibility = if (rule.useAiReply) View.VISIBLE else View.GONE
+
             tvApps.text = formatSelectedApps(ctx, rule.selectedPackages)
             tvCondition.text = formatCondition(ctx, rule)
-            tvReplyPreview.text = rule.replyMessage
+            tvReplyPreview.text = when {
+                rule.useAiReply && rule.replyMessage.isBlank() ->
+                    ctx.getString(R.string.rule_ai_preview_default)
+                rule.useAiReply ->
+                    "AI: ${rule.replyMessage}"
+                else -> rule.replyMessage
+            }
 
             val metaSummary = buildMetaSummary(ctx, rule)
             if (metaSummary.isNotEmpty()) {

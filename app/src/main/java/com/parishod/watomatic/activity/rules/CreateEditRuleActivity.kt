@@ -96,6 +96,7 @@ class CreateEditRuleActivity : BaseActivity() {
         setupApplicationsSection()
         setupMatchConditionsSection()
         setupKeywordsSection()
+        setupReplyMessageSection()
         setupAdvancedSection()
         setupContactAndGroupSection()
         setupScheduleSection()
@@ -356,6 +357,23 @@ class CreateEditRuleActivity : BaseActivity() {
         return true
     }
 
+    private fun setupReplyMessageSection() {
+        binding.switchUseAiReply.setOnCheckedChangeListener { _, isChecked ->
+            updateReplyMessageHint(isChecked)
+            if (isChecked) {
+                binding.tilReplyMessage.error = null
+            }
+            markDirty()
+        }
+        updateReplyMessageHint(binding.switchUseAiReply.isChecked)
+    }
+
+    private fun updateReplyMessageHint(useAi: Boolean) {
+        binding.tilReplyMessage.hint = getString(
+            if (useAi) R.string.rule_ai_guidance_hint else R.string.reply_message_hint
+        )
+    }
+
     private fun setupAdvancedSection() {
         val windowOptions = listOf(
             60 to getString(R.string.window_hourly),
@@ -601,6 +619,8 @@ class CreateEditRuleActivity : BaseActivity() {
         keywords.addAll(rule.keywords)
         renderKeywordChips()
 
+        binding.switchUseAiReply.isChecked = rule.useAiReply
+        updateReplyMessageHint(rule.useAiReply)
         binding.etReplyMessage.setText(rule.replyMessage)
         binding.etPriority.setText(rule.priority.toString())
         binding.etReplyDelay.setText(rule.replyDelaySeconds.toString())
@@ -717,7 +737,8 @@ class CreateEditRuleActivity : BaseActivity() {
             valid = false
         }
 
-        if (replyMsg.isEmpty()) {
+        val useAiReply = binding.switchUseAiReply.isChecked
+        if (!useAiReply && replyMsg.isEmpty()) {
             binding.tilReplyMessage.error = getString(R.string.error_reply_message_required)
             valid = false
         } else {
@@ -764,6 +785,7 @@ class CreateEditRuleActivity : BaseActivity() {
             keywords = keywords.toList(),
             isCaseSensitive = binding.switchCaseSensitive.isChecked,
             replyMessage = replyMsg,
+            useAiReply = useAiReply,
             priority = priority,
             replyDelaySeconds = replyDelay,
             cooldownSeconds = cooldown,

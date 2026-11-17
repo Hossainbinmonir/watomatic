@@ -76,6 +76,14 @@ public class PreferencesManager {
     private final String KEY_REMAINING_ATOMS = "pref_remaining_atoms";
     private final String KEY_QUOTA_NOTIFICATION_LAST_SHOWN = "pref_quota_notification_last_shown";
     private final String KEY_RULE_FALLBACK_TO_GLOBAL = "pref_rule_fallback_to_global";
+    private final String KEY_AI_MEMORY_ENABLED = "pref_ai_memory_enabled";
+    private final String KEY_AI_MEMORY_MAX_TURNS = "pref_ai_memory_max_turns";
+    private final String KEY_AI_AUTO_NOTES_ENABLED = "pref_ai_auto_notes_enabled";
+    private final String KEY_AI_COOLDOWN_SECONDS = "pref_ai_cooldown_seconds";
+    private final String KEY_AI_MAX_REPLIES_PER_SENDER = "pref_ai_max_replies_per_sender";
+    private final String KEY_AI_FREQUENCY_WINDOW_MINUTES = "pref_ai_frequency_window_minutes";
+    private final String KEY_AI_GROUP_FILTER_MODE = "pref_ai_group_filter_mode";
+    private final String KEY_AI_SKIP_WHEN_LIMIT_REACHED = "pref_ai_skip_when_limit_reached";
     private static PreferencesManager _instance;
     private final SharedPreferences _sharedPrefs;
     private SharedPreferences _encryptedSharedPrefs;
@@ -766,5 +774,77 @@ public class PreferencesManager {
         SharedPreferences.Editor editor = _sharedPrefs.edit();
         editor.putBoolean(KEY_RULE_FALLBACK_TO_GLOBAL, enabled);
         editor.apply();
+    }
+
+    public boolean isAiMemoryEnabled() {
+        return _sharedPrefs.getBoolean(KEY_AI_MEMORY_ENABLED, true);
+    }
+
+    public void setAiMemoryEnabled(boolean enabled) {
+        _sharedPrefs.edit().putBoolean(KEY_AI_MEMORY_ENABLED, enabled).apply();
+    }
+
+    public int getAiMemoryMaxTurns() {
+        int val = _sharedPrefs.getInt(KEY_AI_MEMORY_MAX_TURNS, 12);
+        return Math.max(2, Math.min(40, val));
+    }
+
+    public void setAiMemoryMaxTurns(int maxTurns) {
+        int clamped = Math.max(2, Math.min(40, maxTurns));
+        _sharedPrefs.edit().putInt(KEY_AI_MEMORY_MAX_TURNS, clamped).apply();
+    }
+
+    public boolean isAiAutoNotesEnabled() {
+        return _sharedPrefs.getBoolean(KEY_AI_AUTO_NOTES_ENABLED, true);
+    }
+
+    public void setAiAutoNotesEnabled(boolean enabled) {
+        _sharedPrefs.edit().putBoolean(KEY_AI_AUTO_NOTES_ENABLED, enabled).apply();
+    }
+
+    public int getAiCooldownSeconds() {
+        return Math.max(0, _sharedPrefs.getInt(KEY_AI_COOLDOWN_SECONDS, 0));
+    }
+
+    public void setAiCooldownSeconds(int seconds) {
+        _sharedPrefs.edit().putInt(KEY_AI_COOLDOWN_SECONDS, Math.max(0, seconds)).apply();
+    }
+
+    public int getAiMaxRepliesPerSender() {
+        return Math.max(0, _sharedPrefs.getInt(KEY_AI_MAX_REPLIES_PER_SENDER, 0));
+    }
+
+    public void setAiMaxRepliesPerSender(int maxReplies) {
+        _sharedPrefs.edit().putInt(KEY_AI_MAX_REPLIES_PER_SENDER, Math.max(0, maxReplies)).apply();
+    }
+
+    public int getAiFrequencyWindowMinutes() {
+        return Math.max(0, _sharedPrefs.getInt(KEY_AI_FREQUENCY_WINDOW_MINUTES, 1440));
+    }
+
+    public void setAiFrequencyWindowMinutes(int minutes) {
+        _sharedPrefs.edit().putInt(KEY_AI_FREQUENCY_WINDOW_MINUTES, Math.max(0, minutes)).apply();
+    }
+
+    public String getAiGroupFilterMode() {
+        if (!_sharedPrefs.contains(KEY_AI_GROUP_FILTER_MODE)) {
+            return isGroupReplyEnabled() ? "BOTH" : "DIRECT_ONLY";
+        }
+        return _sharedPrefs.getString(KEY_AI_GROUP_FILTER_MODE, "DIRECT_ONLY");
+    }
+
+    public void setAiGroupFilterMode(String mode) {
+        String sanitized = (mode != null && (mode.equals("BOTH") || mode.equals("DIRECT_ONLY") || mode.equals("GROUP_ONLY")))
+                ? mode
+                : "DIRECT_ONLY";
+        _sharedPrefs.edit().putString(KEY_AI_GROUP_FILTER_MODE, sanitized).apply();
+    }
+
+    public boolean isAiSkipWhenLimitReached() {
+        return _sharedPrefs.getBoolean(KEY_AI_SKIP_WHEN_LIMIT_REACHED, true);
+    }
+
+    public void setAiSkipWhenLimitReached(boolean skip) {
+        _sharedPrefs.edit().putBoolean(KEY_AI_SKIP_WHEN_LIMIT_REACHED, skip).apply();
     }
 }

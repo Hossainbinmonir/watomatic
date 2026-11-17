@@ -102,6 +102,12 @@
             android:label="@string/reply_history_title"
             android:parentActivityName=".activity.main.MainActivity" />
 
+        <activity
+            android:name=".activity.notes.AiNotesActivity"
+            android:exported="false"
+            android:label="@string/ai_notes_title"
+            android:parentActivityName=".activity.main.MainActivity" />
+
         <!-- Notification Listener Service -->
         <service
             android:name=".service.NotificationService"

@@ -42,9 +42,12 @@ import com.parishod.watomatic.R;
 import com.parishod.watomatic.activity.about.AboutActivity;
 import com.parishod.watomatic.activity.customreplyeditor.CustomReplyEditorActivity;
 import com.parishod.watomatic.activity.history.ReplyHistoryActivity;
+import com.parishod.watomatic.activity.notes.AiNotesActivity;
 import com.parishod.watomatic.activity.rules.RuleDashboardActivity;
 import com.parishod.watomatic.activity.settings.SettingsActivity;
 import com.parishod.watomatic.model.CustomRepliesData;
+import com.parishod.watomatic.model.ai.AiMemoryDao;
+import com.parishod.watomatic.model.ai.AiMemoryDatabase;
 import com.parishod.watomatic.model.preferences.PreferencesManager;
 import com.parishod.watomatic.model.rules.AutoReplyRulesDatabase;
 import com.parishod.watomatic.model.utils.Constants;
@@ -82,6 +85,7 @@ public class MainFragment extends Fragment {
     private int gitHubReleaseNotesId = -1;
     private TextView multiRuleSummaryText;
     private TextView replyHistorySummaryText;
+    private TextView aiNotesSummaryText;
     private TextView homeStatusText;
     private final ExecutorService rulesExecutor = Executors.newSingleThreadExecutor();
 
@@ -127,7 +131,7 @@ public class MainFragment extends Fragment {
         homeStatusText = view.findViewById(R.id.tv_home_status);
 
         // Setup AI Reply
-        aiReplyText.setText(customRepliesData.getTextToSendOrElse());
+        updateHomeReplyPreview();
 
         // Setup Auto-replies switch
         autoRepliesSwitch.setChecked(preferencesManager.isServiceEnabled());
@@ -169,6 +173,17 @@ public class MainFragment extends Fragment {
         }
         if (viewHistoryBtn != null) {
             viewHistoryBtn.setOnClickListener(v -> openReplyHistoryActivity());
+        }
+
+        // Setup AI Notes & Reminders Card
+        aiNotesSummaryText = view.findViewById(R.id.tv_ai_notes_summary);
+        View aiNotesCard = view.findViewById(R.id.card_ai_notes);
+        View viewNotesBtn = view.findViewById(R.id.btn_view_ai_notes);
+        if (aiNotesCard != null) {
+            aiNotesCard.setOnClickListener(v -> openAiNotesActivity());
+        }
+        if (viewNotesBtn != null) {
+            viewNotesBtn.setOnClickListener(v -> openAiNotesActivity());
         }
 
         // Setup Bottom Navigation
@@ -267,11 +282,29 @@ public class MainFragment extends Fragment {
         setSwitchState();
 
         // Set user auto reply text
-        aiReplyText.setText(customRepliesData.getTextToSendOrElse());
+        updateHomeReplyPreview();
 
         updateMultiRuleSummary();
         updateReplyHistorySummary();
+        updateAiNotesSummary();
         showAppRatingPopup();
+    }
+
+    private void updateHomeReplyPreview() {
+        if (aiReplyText == null) return;
+        if (preferencesManager.isByokRepliesEnabled()) {
+            String provider = preferencesManager.getOpenApiSource();
+            String model = preferencesManager.getSelectedOpenAIModel();
+            if (provider == null || provider.trim().isEmpty()) {
+                provider = "AI";
+            }
+            String modelSuffix = (model != null && !model.trim().isEmpty()) ? " (" + model.trim() + ")" : "";
+            String memoryStatus = preferencesManager.isAiMemoryEnabled() ? "Memory ON" : "Memory OFF";
+            String base = customRepliesData.getTextToSendOrElse();
+            aiReplyText.setText(base + "\n" + provider.trim() + modelSuffix + " • " + memoryStatus);
+        } else {
+            aiReplyText.setText(customRepliesData.getTextToSendOrElse());
+        }
     }
 
     private void openRuleDashboardActivity() {
@@ -280,6 +313,10 @@ public class MainFragment extends Fragment {
 
     private void openReplyHistoryActivity() {
         startActivity(new Intent(requireActivity(), ReplyHistoryActivity.class));
+    }
+
+    private void openAiNotesActivity() {
+        startActivity(new Intent(requireActivity(), AiNotesActivity.class));
     }
 
     private void updateMultiRuleSummary() {
@@ -332,6 +369,34 @@ public class MainFragment extends Fragment {
                 }
             } catch (Exception e) {
                 Log.w("MainFragment", "Failed to load reply history summary", e);
+            }
+        });
+    }
+
+    private void updateAiNotesSummary() {
+        if (aiNotesSummaryText == null || getContext() == null) {
+            return;
+        }
+        final Context appContext = requireContext().getApplicationContext();
+        rulesExecutor.execute(() -> {
+            try {
+                AiMemoryDao dao = AiMemoryDatabase.getInstance(appContext).aiMemoryDao();
+                int pending = dao.getPendingNoteCountSync();
+                int total = dao.getTotalNoteCountSync();
+                if (isAdded() && aiNotesSummaryText != null) {
+                    aiNotesSummaryText.post(() -> {
+                        if (!isAdded()) return;
+                        if (total == 0) {
+                            aiNotesSummaryText.setText(R.string.ai_notes_card_summary_empty);
+                        } else if (pending > 0) {
+                            aiNotesSummaryText.setText(getString(R.string.ai_notes_card_summary_pending, pending));
+                        } else {
+                            aiNotesSummaryText.setText(getString(R.string.ai_notes_card_summary_done, total));
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                Log.w("MainFragment", "Failed to load AI notes summary", e);
             }
         });
     }

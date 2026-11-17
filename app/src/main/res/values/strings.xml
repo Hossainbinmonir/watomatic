@@ -647,4 +647,78 @@
     <string name="home_active_status">Auto-reply active</string>
     <string name="home_paused_status">Auto-reply paused</string>
     <string name="home_default_reply_eyebrow">DEFAULT AUTO-REPLY</string>
+
+    <!-- AI Memory, Notes & Rules -->
+    <string name="ai_section_memory_title">Memory &amp; Smart Notes</string>
+    <string name="ai_section_memory_subtitle">Remember conversations per contact and automatically capture reminders or tasks requested in chat.</string>
+    <string name="ai_memory_enable_label">Remember Conversation Context</string>
+    <string name="ai_memory_enable_desc">Keeps recent chat turns per sender so AI continues naturally instead of starting over</string>
+    <string name="ai_memory_depth_label">Context Messages per Chat</string>
+    <string name="ai_memory_depth_6">Last 6 messages</string>
+    <string name="ai_memory_depth_12">Last 12 messages</string>
+    <string name="ai_memory_depth_20">Last 20 messages</string>
+    <string name="ai_memory_depth_30">Last 30 messages</string>
+    <string name="ai_auto_notes_enable_label">Auto-Save Notes &amp; Reminders</string>
+    <string name="ai_auto_notes_enable_desc">Saves tasks, callbacks, and reminders from messages for you to review later</string>
+    <string name="ai_view_notes_btn">View Notes (%1$d)</string>
+    <string name="ai_view_notes_short">AI Notes</string>
+    <string name="ai_clear_memory_btn">Clear Chat Memory</string>
+    <string name="ai_clear_memory_count_btn">Clear Memory (%1$d)</string>
+    <string name="ai_clear_memory_title">Clear AI Conversation Memory?</string>
+    <string name="ai_clear_memory_message">This deletes all remembered chat history across contacts. Saved Notes &amp; Reminders will be kept.</string>
+    <string name="ai_memory_cleared_toast">AI conversation memory cleared</string>
+
+    <string name="ai_section_rules_title">AI Reply Rules &amp; Limits</string>
+    <string name="ai_section_rules_subtitle">Control how often and to whom AI responds automatically.</string>
+    <string name="ai_cooldown_label">Cooldown Between AI Replies (seconds)</string>
+    <string name="ai_cooldown_helper">Minimum wait before replying to the same user again (0 = no cooldown)</string>
+    <string name="ai_cooldown_off">Off</string>
+    <string name="ai_cooldown_30s">30s</string>
+    <string name="ai_cooldown_1m">1m</string>
+    <string name="ai_cooldown_5m">5m</string>
+    <string name="ai_cooldown_30m">30m</string>
+    <string name="ai_max_replies_label">Max AI Replies per User</string>
+    <string name="ai_max_replies_helper">0 = unlimited replies per window</string>
+    <string name="ai_limit_reached_action_label">When AI Limit or Cooldown Is Reached</string>
+    <string name="ai_limit_action_skip">Pause / Skip Replying</string>
+    <string name="ai_limit_action_fallback">Send Default Message</string>
+    <string name="ai_notes_card_title">AI Notes &amp; Reminders</string>
+    <string name="ai_notes_card_summary_empty">View tasks and reminders saved by AI</string>
+    <string name="ai_notes_card_summary_pending">%1$d pending reminder(s) saved</string>
+    <string name="ai_notes_card_summary_done">All %1$d saved note(s) completed</string>
+    <string name="view_notes">Notes</string>
+
+    <!-- AI Notes Activity -->
+    <string name="ai_notes_title">AI Notes &amp; Reminders</string>
+    <string name="ai_notes_pending_stat">Pending</string>
+    <string name="ai_notes_completed_stat">Completed</string>
+    <string name="ai_notes_search_hint">Search notes, sender, or original message</string>
+    <string name="ai_notes_tab_all">All</string>
+    <string name="ai_notes_tab_pending">Pending</string>
+    <string name="ai_notes_tab_completed">Completed</string>
+    <string name="ai_notes_clear_done">Clear Done</string>
+    <string name="ai_notes_add_btn">Add Note</string>
+    <string name="ai_notes_add_title">Add Reminder / Note</string>
+    <string name="ai_notes_note_hint">What should you remember?</string>
+    <string name="ai_notes_sender_hint">Related person / label (optional)</string>
+    <string name="ai_notes_manual_label">Manual Note</string>
+    <string name="ai_notes_from_message_label">Original Message</string>
+    <string name="ai_notes_status_pending">PENDING</string>
+    <string name="ai_notes_status_done">DONE</string>
+    <string name="ai_notes_copied_toast">Note copied</string>
+    <string name="ai_notes_deleted_toast">Note deleted</string>
+    <string name="ai_notes_cleared_done_toast">Cleared completed notes</string>
+    <string name="ai_notes_empty_title">No Notes Saved Yet</string>
+    <string name="ai_notes_empty_subtitle">When a contact asks to remind you of something or leave a message, AI will automatically save it here.</string>
+    <string name="ai_notes_empty_filtered">No notes match your filter.</string>
+    <string name="ai_notes_copy_desc">Copy note</string>
+    <string name="ai_notes_delete_desc">Delete note</string>
+    <string name="ai_notes_mark_done_desc">Toggle reminder completion</string>
+
+    <!-- Multi-Rule AI Toggle -->
+    <string name="rule_use_ai_label">Generate Reply Using AI</string>
+    <string name="rule_use_ai_desc">Uses configured AI (with memory &amp; notes) instead of a fixed message</string>
+    <string name="rule_ai_guidance_hint">Optional AI instructions or fallback message for this rule</string>
+    <string name="rule_ai_badge">AI</string>
+    <string name="rule_ai_preview_default">AI-generated reply (uses conversation memory &amp; notes)</string>
 </resources>
