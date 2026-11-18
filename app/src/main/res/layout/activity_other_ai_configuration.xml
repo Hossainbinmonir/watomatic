@@ -143,13 +143,28 @@
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <TextView
+                        android:id="@+id/tv_api_key_security_hint"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:fontFamily="@font/noto_sans"
                         android:text="Your API key is stored securely on your device."
                         android:textColor="@color/text_secondary"
                         android:textSize="12sp"
-                        android:layout_marginBottom="16dp" />
+                        android:layout_marginBottom="4dp" />
+
+                    <TextView
+                        android:id="@+id/tv_secure_storage_error"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/inter_medium"
+                        android:textColor="@color/rule_danger"
+                        android:textSize="12sp"
+                        android:visibility="gone"
+                        android:layout_marginBottom="12dp" />
+
+                    <Space
+                        android:layout_width="match_parent"
+                        android:layout_height="8dp" />
 
                     <!-- Model Header + Refresh -->
                     <LinearLayout

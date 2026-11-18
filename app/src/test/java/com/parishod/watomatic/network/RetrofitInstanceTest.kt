@@ -1,10 +1,13 @@
 package com.parishod.watomatic.network
 
+import okhttp3.OkHttpClient
+import okhttp3.logging.HttpLoggingInterceptor
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.converter.scalars.ScalarsConverterFactory
 
@@ -166,5 +169,63 @@ class RetrofitInstanceTest {
     fun `parseAtomaticAIError returns null for null error body`() {
         val response = retrofit2.Response.success<String>("ok")
         assertNull(RetrofitInstance.parseAtomaticAIError(response))
+    }
+
+    // --- Network logging security & timeout preservation ---
+
+    private fun assertNoSensitiveHttpLogging(retrofit: Retrofit, clientName: String) {
+        val callFactory = retrofit.callFactory()
+        assertTrue("$clientName should use OkHttpClient", callFactory is OkHttpClient)
+        val client = callFactory as OkHttpClient
+        val allInterceptors = client.interceptors + client.networkInterceptors
+        for (interceptor in allInterceptors) {
+            if (interceptor is HttpLoggingInterceptor) {
+                assertEquals(
+                    "$clientName HttpLoggingInterceptor must be NONE if present",
+                    HttpLoggingInterceptor.Level.NONE,
+                    interceptor.level
+                )
+            }
+        }
+        assertFalse(
+            "$clientName must not attach HttpLoggingInterceptor",
+            allInterceptors.any { it is HttpLoggingInterceptor }
+        )
+    }
+
+    @Test
+    fun `github Retrofit client disables HTTP BODY logging`() {
+        assertNoSensitiveHttpLogging(RetrofitInstance.getRetrofitInstance(), "GitHub")
+    }
+
+    @Test
+    fun `openAI default Retrofit client disables HTTP BODY logging`() {
+        assertNoSensitiveHttpLogging(RetrofitInstance.getOpenAIRetrofitInstance(), "OpenAI default")
+    }
+
+    @Test
+    fun `openAI custom base URL Retrofit client disables HTTP BODY logging`() {
+        val customClient = RetrofitInstance.getOpenAIRetrofitInstance("https://custom.llm.example.com/v1/")
+        assertNoSensitiveHttpLogging(customClient, "OpenAI custom")
+    }
+
+    @Test
+    fun `atomatic AI Retrofit client disables HTTP BODY logging`() {
+        assertNoSensitiveHttpLogging(RetrofitInstance.getAtomaticAIRetrofitInstance(), "Atomatic AI")
+    }
+
+    @Test
+    fun `openAI and atomatic AI clients preserve existing timeout configurations`() {
+        val openAiClient = RetrofitInstance.getOpenAIRetrofitInstance().callFactory() as OkHttpClient
+        assertEquals(30_000, openAiClient.connectTimeoutMillis)
+        assertEquals(40_000, openAiClient.readTimeoutMillis)
+        assertEquals(30_000, openAiClient.writeTimeoutMillis)
+        assertEquals(45_000, openAiClient.callTimeoutMillis)
+
+        val atomaticClient = RetrofitInstance.getAtomaticAIRetrofitInstance().callFactory() as OkHttpClient
+        assertEquals(30_000, atomaticClient.connectTimeoutMillis)
+        assertEquals(40_000, atomaticClient.readTimeoutMillis)
+        assertEquals(30_000, atomaticClient.writeTimeoutMillis)
+        assertEquals(45_000, atomaticClient.callTimeoutMillis)
     }
 }

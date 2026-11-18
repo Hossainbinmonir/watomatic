@@ -20,12 +20,6 @@ import java.lang.reflect.Type;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
-import java.io.IOException;
-import java.lang.reflect.Type;
-import java.security.GeneralSecurityException;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 
@@ -84,24 +78,34 @@ public class PreferencesManager {
     private final String KEY_AI_FREQUENCY_WINDOW_MINUTES = "pref_ai_frequency_window_minutes";
     private final String KEY_AI_GROUP_FILTER_MODE = "pref_ai_group_filter_mode";
     private final String KEY_AI_SKIP_WHEN_LIMIT_REACHED = "pref_ai_skip_when_limit_reached";
+    public static final String SECURE_PREFS_NAME = "watomatic_secure_prefs";
+    public static final String LEGACY_FALLBACK_PREFS_NAME = "watomatic_secure_prefs_fallback";
+
+    @androidx.annotation.VisibleForTesting
+    public interface EncryptedPrefsProvider {
+        SharedPreferences create(Context context) throws Exception;
+    }
+
+    private static volatile EncryptedPrefsProvider _encryptedPrefsProviderOverride;
     private static PreferencesManager _instance;
     private final SharedPreferences _sharedPrefs;
     private SharedPreferences _encryptedSharedPrefs;
-    private final SharedPreferences _fallbackSecurePrefs;
+    private boolean _secureStorageAvailable;
+    private String _secureStorageErrorMessage;
     private final Context thisAppContext;
 
     private PreferencesManager(Context context) {
         thisAppContext = context;
         _sharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
-        _fallbackSecurePrefs = context.getSharedPreferences("watomatic_secure_prefs_fallback", Context.MODE_PRIVATE);
         _encryptedSharedPrefs = createEncryptedSharedPrefs(context);
-        if (_encryptedSharedPrefs == null) {
-            try {
-                context.getSharedPreferences("watomatic_secure_prefs", Context.MODE_PRIVATE)
-                        .edit().clear().apply();
-                _encryptedSharedPrefs = createEncryptedSharedPrefs(context);
-            } catch (Exception e) {
-                Log.e("PreferencesManager", "Retry creating EncryptedSharedPreferences failed", e);
+        if (_encryptedSharedPrefs != null) {
+            _secureStorageAvailable = true;
+            _secureStorageErrorMessage = null;
+            migrateLegacyCredentialsIfNeeded();
+        } else {
+            _secureStorageAvailable = false;
+            if (_secureStorageErrorMessage == null) {
+                _secureStorageErrorMessage = "Secure encrypted credential storage is unavailable on this device.";
             }
         }
         init();
@@ -109,21 +113,27 @@ public class PreferencesManager {
 
     private SharedPreferences createEncryptedSharedPrefs(Context context) {
         try {
+            EncryptedPrefsProvider override = _encryptedPrefsProviderOverride;
+            if (override != null) {
+                return override.create(context);
+            }
             String masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC);
             return EncryptedSharedPreferences.create(
-                "watomatic_secure_prefs",
+                SECURE_PREFS_NAME,
                 masterKeyAlias,
                 context,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             );
         } catch (Exception e) {
-            Log.e("PreferencesManager", "Error initializing EncryptedSharedPreferences", e);
+            _secureStorageErrorMessage = "Secure encrypted credential storage is unavailable (" + e.getClass().getSimpleName() + ").";
+            Log.e("PreferencesManager", "Error initializing EncryptedSharedPreferences (" + e.getClass().getSimpleName() + ")");
             return null;
         } catch (Error e) {
             // Catches LinkageError/NoClassDefFoundError which can occur in test environments
             // when the Android Keystore hardware abstraction is not available.
-            Log.e("PreferencesManager", "Error initializing EncryptedSharedPreferences (hardware unavailable)", e);
+            _secureStorageErrorMessage = "Secure encrypted credential storage is unavailable on this device.";
+            Log.e("PreferencesManager", "Error initializing EncryptedSharedPreferences (hardware unavailable)");
             return null;
         }
     }
@@ -136,8 +146,14 @@ public class PreferencesManager {
     }
 
     @androidx.annotation.VisibleForTesting
+    public static void setEncryptedPrefsProviderForTesting(EncryptedPrefsProvider provider) {
+        _encryptedPrefsProviderOverride = provider;
+    }
+
+    @androidx.annotation.VisibleForTesting
     public static void resetInstance() {
         _instance = null;
+        _encryptedPrefsProviderOverride = null;
     }
 
     /**
@@ -434,30 +450,169 @@ public class PreferencesManager {
         editor.apply();
     }
 
-    public void saveOpenAIApiKey(String apiKey) {
-        if (_encryptedSharedPrefs != null) {
-            try {
-                _encryptedSharedPrefs.edit().putString(KEY_OPENAI_API_KEY, apiKey).apply();
-                return;
-            } catch (Exception e) {
-                Log.e("PreferencesManager", "EncryptedSharedPreferences write failed, using fallback", e);
-            }
+    public boolean isSecureStorageAvailable() {
+        return _encryptedSharedPrefs != null && _secureStorageAvailable;
+    }
+
+    public String getSecureStorageError() {
+        return _secureStorageErrorMessage;
+    }
+
+    public boolean hasUnmigratedLegacyApiKey() {
+        try {
+            SharedPreferences legacyPrefs = thisAppContext.getSharedPreferences(LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE);
+            String legacyKey = legacyPrefs.getString(KEY_OPENAI_API_KEY, null);
+            return legacyKey != null && !legacyKey.isEmpty();
+        } catch (Exception e) {
+            return false;
         }
-        _fallbackSecurePrefs.edit().putString(KEY_OPENAI_API_KEY, apiKey).apply();
+    }
+
+    public boolean retrySecureStorageInitialization() {
+        if (_encryptedSharedPrefs == null || !_secureStorageAvailable) {
+            SharedPreferences retryPrefs = createEncryptedSharedPrefs(thisAppContext);
+            if (retryPrefs != null) {
+                _encryptedSharedPrefs = retryPrefs;
+                _secureStorageAvailable = true;
+                _secureStorageErrorMessage = null;
+                migrateLegacyCredentialsIfNeeded();
+            } else {
+                _secureStorageAvailable = false;
+                if (_secureStorageErrorMessage == null) {
+                    _secureStorageErrorMessage = "Secure encrypted credential storage is unavailable on this device.";
+                }
+            }
+        } else {
+            _secureStorageErrorMessage = null;
+            migrateLegacyCredentialsIfNeeded();
+        }
+        return isSecureStorageAvailable();
+    }
+
+    private void migrateLegacyCredentialsIfNeeded() {
+        if (_encryptedSharedPrefs == null) {
+            return;
+        }
+        SharedPreferences legacyPrefs;
+        try {
+            legacyPrefs = thisAppContext.getSharedPreferences(LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE);
+        } catch (Exception e) {
+            Log.e("PreferencesManager", "Unable to inspect legacy fallback storage (" + e.getClass().getSimpleName() + ")");
+            return;
+        }
+
+        String legacyKey;
+        try {
+            legacyKey = legacyPrefs.getString(KEY_OPENAI_API_KEY, null);
+        } catch (Exception e) {
+            Log.e("PreferencesManager", "Unable to read legacy API key (" + e.getClass().getSimpleName() + ")");
+            return;
+        }
+
+        if (legacyKey == null || legacyKey.isEmpty()) {
+            return;
+        }
+
+        try {
+            String existingEncryptedKey = _encryptedSharedPrefs.getString(KEY_OPENAI_API_KEY, null);
+            if (existingEncryptedKey != null && !existingEncryptedKey.isEmpty()) {
+                legacyPrefs.edit().remove(KEY_OPENAI_API_KEY).commit();
+                return;
+            }
+
+            boolean committed = _encryptedSharedPrefs.edit().putString(KEY_OPENAI_API_KEY, legacyKey).commit();
+            if (!committed) {
+                _secureStorageAvailable = false;
+                _secureStorageErrorMessage = "Failed to migrate legacy API key to secure storage.";
+                Log.e("PreferencesManager", "Legacy API key migration commit failed; legacy credential retained.");
+                return;
+            }
+
+            String verified = _encryptedSharedPrefs.getString(KEY_OPENAI_API_KEY, null);
+            if (legacyKey.equals(verified)) {
+                legacyPrefs.edit().remove(KEY_OPENAI_API_KEY).commit();
+            } else {
+                _secureStorageAvailable = false;
+                _secureStorageErrorMessage = "Failed to verify migrated API key in secure storage.";
+                Log.e("PreferencesManager", "Legacy API key migration verification failed; legacy credential retained.");
+            }
+        } catch (Exception | Error e) {
+            _secureStorageAvailable = false;
+            _secureStorageErrorMessage = "Failed to migrate legacy API key to secure storage.";
+            Log.e("PreferencesManager", "Legacy API key migration failed (" + e.getClass().getSimpleName() + "); legacy credential retained.");
+        }
+    }
+
+    private void removeLegacyApiKeyIfPresent() {
+        try {
+            SharedPreferences legacyPrefs = thisAppContext.getSharedPreferences(LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE);
+            if (legacyPrefs.contains(KEY_OPENAI_API_KEY)) {
+                legacyPrefs.edit().remove(KEY_OPENAI_API_KEY).commit();
+            }
+        } catch (Exception e) {
+            Log.w("PreferencesManager", "Unable to clean up legacy fallback key (" + e.getClass().getSimpleName() + ")");
+        }
+    }
+
+    public void saveOpenAIApiKey(String apiKey) {
+        saveOpenAIApiKeySecurely(apiKey);
+    }
+
+    public boolean saveOpenAIApiKeySecurely(String apiKey) {
+        if (apiKey == null || apiKey.trim().isEmpty()) {
+            return false;
+        }
+        if (_encryptedSharedPrefs == null || !_secureStorageAvailable) {
+            if (_secureStorageErrorMessage == null) {
+                _secureStorageErrorMessage = "Secure encrypted credential storage is unavailable on this device.";
+            }
+            Log.e("PreferencesManager", "Refusing to save API key: encrypted storage unavailable.");
+            return false;
+        }
+        try {
+            boolean committed = _encryptedSharedPrefs.edit().putString(KEY_OPENAI_API_KEY, apiKey).commit();
+            if (!committed) {
+                _secureStorageAvailable = false;
+                _secureStorageErrorMessage = "Failed to commit API key to secure storage.";
+                Log.e("PreferencesManager", "EncryptedSharedPreferences commit returned false.");
+                return false;
+            }
+            String verified = _encryptedSharedPrefs.getString(KEY_OPENAI_API_KEY, null);
+            boolean matches = apiKey.equals(verified);
+            if (matches) {
+                _secureStorageAvailable = true;
+                _secureStorageErrorMessage = null;
+                removeLegacyApiKeyIfPresent();
+                return true;
+            }
+            _secureStorageAvailable = false;
+            _secureStorageErrorMessage = "Failed to verify API key in secure storage.";
+            Log.e("PreferencesManager", "EncryptedSharedPreferences write verification failed.");
+            return false;
+        } catch (Exception | Error e) {
+            _secureStorageAvailable = false;
+            _secureStorageErrorMessage = "Failed to write API key to secure storage.";
+            Log.e("PreferencesManager", "EncryptedSharedPreferences write failed (" + e.getClass().getSimpleName() + ")");
+            return false;
+        }
     }
 
     public String getOpenAIApiKey() {
-        if (_encryptedSharedPrefs != null) {
+        if (_encryptedSharedPrefs != null && _secureStorageAvailable) {
             try {
                 String value = _encryptedSharedPrefs.getString(KEY_OPENAI_API_KEY, null);
                 if (value != null && !value.isEmpty()) {
                     return value;
                 }
-            } catch (Exception e) {
-                Log.e("PreferencesManager", "EncryptedSharedPreferences read failed, using fallback", e);
+                return null;
+            } catch (Exception | Error e) {
+                _secureStorageAvailable = false;
+                _secureStorageErrorMessage = "Failed to read API key from secure storage.";
+                Log.e("PreferencesManager", "EncryptedSharedPreferences read failed (" + e.getClass().getSimpleName() + ")");
+                return null;
             }
         }
-        return _fallbackSecurePrefs.getString(KEY_OPENAI_API_KEY, null);
+        return null;
     }
 
     public void saveOpenApiSource(String apiSource) {
@@ -481,14 +636,32 @@ public class PreferencesManager {
     }
 
     public void deleteOpenAIApiKey() {
-        if (_encryptedSharedPrefs != null) {
-            try {
-                _encryptedSharedPrefs.edit().remove(KEY_OPENAI_API_KEY).apply();
-            } catch (Exception e) {
-                Log.e("PreferencesManager", "EncryptedSharedPreferences delete failed", e);
+        deleteOpenAIApiKeySecurely();
+    }
+
+    public boolean deleteOpenAIApiKeySecurely() {
+        if (_encryptedSharedPrefs == null) {
+            _secureStorageAvailable = false;
+            if (_secureStorageErrorMessage == null) {
+                _secureStorageErrorMessage = "Secure encrypted credential storage is unavailable on this device.";
             }
+            return false;
         }
-        _fallbackSecurePrefs.edit().remove(KEY_OPENAI_API_KEY).apply();
+        try {
+            boolean committed = _encryptedSharedPrefs.edit().remove(KEY_OPENAI_API_KEY).commit();
+            String remaining = _encryptedSharedPrefs.getString(KEY_OPENAI_API_KEY, null);
+            boolean removed = committed && remaining == null;
+            if (removed) {
+                _secureStorageErrorMessage = null;
+                removeLegacyApiKeyIfPresent();
+            }
+            return removed;
+        } catch (Exception | Error e) {
+            _secureStorageAvailable = false;
+            _secureStorageErrorMessage = "Failed to delete API key from secure storage.";
+            Log.e("PreferencesManager", "EncryptedSharedPreferences delete failed (" + e.getClass().getSimpleName() + ")");
+            return false;
+        }
     }
 
     public void setEnableOpenAIReplies(boolean enabled) {

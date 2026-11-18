@@ -43,6 +43,16 @@ public class OpenAIHelper {
 
         Log.d(TAG, "Fetching models from API.");
         PreferencesManager prefs = PreferencesManager.getPreferencesInstance(context.getApplicationContext());
+        if (!prefs.isSecureStorageAvailable()) {
+            Log.e(TAG, "Secure storage unavailable; cannot retrieve API key.");
+            if (callback != null) {
+                String storageErr = prefs.getSecureStorageError();
+                callback.onError(storageErr != null && !storageErr.isEmpty()
+                        ? storageErr
+                        : "Secure credential storage is unavailable.");
+            }
+            return;
+        }
         String apiKey = prefs.getOpenAIApiKey();
 
         if (apiKey == null || apiKey.isEmpty()) {
@@ -56,7 +66,6 @@ public class OpenAIHelper {
         String apiSource = prefs.getOpenApiSource();
         Log.d(TAG, "API Source: " + apiSource);
         String customApiUrl = prefs.getCustomOpenAIApiUrl();
-        Log.d(TAG, "customApiUrl: " + customApiUrl);
 
         Retrofit retrofit;
         if (CUSTOM_AI_PROVIDER_NAME.equals(apiSource) && customApiUrl != null && !customApiUrl.isEmpty()) {
@@ -79,18 +88,7 @@ public class OpenAIHelper {
                         callback.onModelsFetched(cachedModels);
                     }
                 } else {
-                    // Try to parse specific OpenAI error
-                    OpenAIErrorResponse parsedError = RetrofitInstance.parseOpenAIError(response);
-                    String specificErrorMessage = null;
-                    if (parsedError != null && parsedError.getError() != null && parsedError.getError().getMessage() != null) {
-                        specificErrorMessage = parsedError.getError().getMessage();
-                    }
-
-                    String errorMsg = "Failed to fetch models. Code: " + response.code() + ", Message: " + response.message();
-                    if (specificErrorMessage != null && !specificErrorMessage.isEmpty()) {
-                        errorMsg += " (OpenAI: " + specificErrorMessage + ")";
-                    }
-
+                    String errorMsg = "Failed to fetch models (HTTP " + response.code() + ")";
                     Log.e(TAG, errorMsg);
                     if (callback != null) {
                         callback.onError(errorMsg);
@@ -100,8 +98,9 @@ public class OpenAIHelper {
 
             @Override
             public void onFailure(Call<OpenAIModelsResponse> call, Throwable t) {
-                String errorMsg = "Failed to fetch models: " + t.getMessage();
-                Log.e(TAG, errorMsg, t);
+                String errorType = t != null ? t.getClass().getSimpleName() : "NetworkError";
+                String errorMsg = "Failed to fetch models (" + errorType + ")";
+                Log.e(TAG, errorMsg);
                 if (callback != null) {
                     callback.onError(errorMsg);
                 }

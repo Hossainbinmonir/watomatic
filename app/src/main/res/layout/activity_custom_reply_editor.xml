@@ -249,17 +249,35 @@
                             android:layout_marginBottom="14dp"
                             android:background="@color/rule_card_stroke" />
 
-                        <!-- Status Text -->
-                        <TextView
-                            android:id="@+id/other_ai_status_text"
-                            android:layout_width="wrap_content"
+                        <!-- Status Text + One-Click Copy -->
+                        <LinearLayout
+                            android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:fontFamily="@font/inter_medium"
-                            android:paddingHorizontal="16dp"
-                            android:paddingBottom="10dp"
-                            android:text="Status: Not Configured"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="13sp" />
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal"
+                            android:paddingStart="16dp"
+                            android:paddingEnd="8dp"
+                            android:paddingBottom="6dp">
+
+                            <TextView
+                                android:id="@+id/other_ai_status_text"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:fontFamily="@font/inter_medium"
+                                android:text="Status: Not Configured"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="13sp" />
+
+                            <ImageButton
+                                android:id="@+id/btn_copy_ai_status"
+                                android:layout_width="48dp"
+                                android:layout_height="48dp"
+                                android:background="?attr/selectableItemBackgroundBorderless"
+                                android:contentDescription="@string/ai_status_copy_desc"
+                                android:src="@drawable/ic_content_copy"
+                                app:tint="@color/text_secondary" />
+                        </LinearLayout>
 
                         <!-- Quick Actions: AI Notes & AI Rules/Memory -->
                         <LinearLayout

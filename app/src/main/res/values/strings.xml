@@ -721,4 +721,20 @@
     <string name="rule_ai_guidance_hint">Optional AI instructions or fallback message for this rule</string>
     <string name="rule_ai_badge">AI</string>
     <string name="rule_ai_preview_default">AI-generated reply (uses conversation memory &amp; notes)</string>
+
+    <!-- Secure Credential Storage Errors -->
+    <string name="secure_storage_unavailable_notice">Secure encrypted storage is unavailable on this device. API keys cannot be saved until Android Keystore is available.</string>
+    <string name="secure_storage_unavailable_legacy_notice">Secure encrypted storage is unavailable on this device. Your previous API key cannot be accessed securely; please check device security or re-enter your key once secure storage is restored.</string>
+    <string name="secure_storage_unavailable_save_error">Cannot save API key because secure encrypted storage is unavailable on this device.</string>
+    <string name="secure_storage_unavailable_status">Status: Secure encrypted storage unavailable</string>
+
+    <!-- One-Click Report Copy -->
+    <string name="copy_report_btn">Copy Report</string>
+    <string name="copy_report_desc">Copy full report</string>
+    <string name="history_copy_entry_desc">Copy reply entry</string>
+    <string name="history_entry_copied_toast">Reply entry copied</string>
+    <string name="history_report_copied_toast">Reply history report copied</string>
+    <string name="ai_notes_report_copied_toast">Notes report copied</string>
+    <string name="ai_status_copy_desc">Copy AI status</string>
+    <string name="ai_status_copied_toast">AI status copied</string>
 </resources>

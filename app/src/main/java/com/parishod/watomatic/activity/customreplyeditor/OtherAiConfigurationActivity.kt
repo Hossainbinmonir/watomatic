@@ -57,6 +57,7 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
     private lateinit var modelFetchProgress: ProgressBar
     private lateinit var modelFetchStatus: TextView
     private lateinit var btnRefreshModels: View
+    private lateinit var tvSecureStorageError: TextView
 
     // Memory, Smart Notes & AI Rules controls
     private lateinit var switchAiMemory: MaterialSwitch
@@ -153,6 +154,7 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         modelFetchProgress = findViewById(R.id.pb_model_fetch)
         modelFetchStatus = findViewById(R.id.tv_model_fetch_status)
         btnRefreshModels = findViewById(R.id.btn_refresh_models)
+        tvSecureStorageError = findViewById(R.id.tv_secure_storage_error)
 
         switchAiMemory = findViewById(R.id.switch_ai_memory_enabled)
         actvMemoryDepth = findViewById(R.id.actv_ai_memory_depth)
@@ -181,7 +183,33 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (!preferencesManager.isSecureStorageAvailable) {
+            preferencesManager.retrySecureStorageInitialization()
+        }
+        if (preferencesManager.isSecureStorageAvailable && apiKeyInput.text.isNullOrEmpty()) {
+            val recoveredKey = preferencesManager.openAIApiKey
+            if (!recoveredKey.isNullOrEmpty()) {
+                isPopulating = true
+                apiKeyInput.setText(recoveredKey)
+                initialApiKey = recoveredKey
+                isPopulating = false
+            }
+        }
+        updateSecureStorageErrorBanner()
         refreshMemoryAndNotesCounters()
+    }
+
+    private fun updateSecureStorageErrorBanner() {
+        if (!preferencesManager.isSecureStorageAvailable || !preferencesManager.secureStorageError.isNullOrEmpty()) {
+            tvSecureStorageError.text = if (preferencesManager.hasUnmigratedLegacyApiKey()) {
+                getString(R.string.secure_storage_unavailable_legacy_notice)
+            } else {
+                getString(R.string.secure_storage_unavailable_notice)
+            }
+            tvSecureStorageError.visibility = View.VISIBLE
+        } else {
+            tvSecureStorageError.visibility = View.GONE
+        }
     }
 
     private fun normalizeProviderName(raw: String?): String {
@@ -192,6 +220,7 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
 
     private fun prefillData() {
         isPopulating = true
+        updateSecureStorageErrorBanner()
         val savedProvider = normalizeProviderName(preferencesManager.openApiSource)
         providerInput.setText(savedProvider, false)
         updateBaseUrlVisibility(savedProvider)
@@ -536,7 +565,7 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
 
         if (rawBaseUrl.isEmpty()) return
         if (!isValidUrl(rawBaseUrl)) {
-            Log.d("OtherAiConfig", "Skipping fetch — invalid URL: $rawBaseUrl")
+            Log.d("OtherAiConfig", "Skipping fetch — invalid base URL format")
             return
         }
 
@@ -552,7 +581,7 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         val retrofit = try {
             RetrofitInstance.getOpenAIRetrofitInstance(normalizedBaseUrl)
         } catch (e: IllegalArgumentException) {
-            Log.e("OtherAiConfig", "Invalid base URL for Retrofit: $normalizedBaseUrl", e)
+            Log.e("OtherAiConfig", "Invalid base URL for Retrofit (${e.javaClass.simpleName})")
             return
         }
         val service = retrofit.create(OpenAIService::class.java)
@@ -607,8 +636,8 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
             override fun onFailure(call: Call<JsonElement>, t: Throwable) {
                 if (call.isCanceled || isFinishing || isDestroyed) return
                 setLoadingState(false)
-                val reason = t.localizedMessage ?: "Network error"
-                Log.w("OtherAiConfig", "Failed to fetch models ($provider): $reason", t)
+                val reason = t.javaClass.simpleName
+                Log.w("OtherAiConfig", "Failed to fetch models ($provider): $reason")
                 handleModelFetchFallback(provider, reason, showErrorToast)
             }
         })
@@ -663,6 +692,19 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
         }
         if (model.isEmpty()) {
             Toast.makeText(this, "Select or enter a model", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!preferencesManager.isSecureStorageAvailable) {
+            if (!preferencesManager.retrySecureStorageInitialization()) {
+                updateSecureStorageErrorBanner()
+                Toast.makeText(this, R.string.secure_storage_unavailable_save_error, Toast.LENGTH_LONG).show()
+                return
+            }
+            updateSecureStorageErrorBanner()
+        }
+        if (!preferencesManager.saveOpenAIApiKeySecurely(apiKey)) {
+            updateSecureStorageErrorBanner()
+            Toast.makeText(this, R.string.secure_storage_unavailable_save_error, Toast.LENGTH_LONG).show()
             return
         }
 

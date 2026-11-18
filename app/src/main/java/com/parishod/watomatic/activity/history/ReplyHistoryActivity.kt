@@ -17,12 +17,14 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.parishod.watomatic.R
 import com.parishod.watomatic.activity.BaseActivity
 import com.parishod.watomatic.databinding.ActivityReplyHistoryBinding
+import com.parishod.watomatic.model.utils.ReportCopyHelper
 import kotlinx.coroutines.launch
 
 class ReplyHistoryActivity : BaseActivity() {
     private lateinit var binding: ActivityReplyHistoryBinding
     private val viewModel: ReplyHistoryViewModel by viewModels()
     private lateinit var adapter: ReplyHistoryAdapter
+    private var latestUiState: ReplyHistoryUiState = ReplyHistoryUiState()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,9 +53,17 @@ class ReplyHistoryActivity : BaseActivity() {
     }
 
     private fun setupRecyclerView() {
-        adapter = ReplyHistoryAdapter { logId ->
-            viewModel.deleteEntry(logId)
-        }
+        adapter = ReplyHistoryAdapter(
+            onCopyEntry = { row ->
+                val formatted = ReportCopyHelper.formatReplyHistoryEntry(this, row)
+                if (ReportCopyHelper.copyToClipboard(this, getString(R.string.reply_history_title), formatted)) {
+                    Toast.makeText(this, R.string.history_entry_copied_toast, Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDeleteEntry = { logId ->
+                viewModel.deleteEntry(logId)
+            }
+        )
         binding.historyRecyclerView.layoutManager = LinearLayoutManager(this)
         binding.historyRecyclerView.adapter = adapter
     }
@@ -88,16 +98,25 @@ class ReplyHistoryActivity : BaseActivity() {
                 .setNegativeButton(android.R.string.cancel, null)
                 .show()
         }
+        binding.btnCopyHistoryReport.setOnClickListener {
+            val formattedReport = ReportCopyHelper.formatReplyHistoryReport(this, latestUiState)
+            if (ReportCopyHelper.copyToClipboard(this, getString(R.string.reply_history_title), formattedReport)) {
+                Toast.makeText(this, R.string.history_report_copied_toast, Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun observeUiState() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.uiState.collect { state ->
+                    latestUiState = state
                     binding.tvTotalRepliesCount.text = state.totalReplies.toString()
                     binding.tvUniqueMessagesCount.text = state.uniqueMessages.toString()
                     binding.btnClearHistory.visibility =
                         if (state.totalReplies > 0) View.VISIBLE else View.GONE
+                    binding.btnCopyHistoryReport.visibility =
+                        if (state.displayedRows.isNotEmpty()) View.VISIBLE else View.GONE
 
                     adapter.submitList(state.displayedRows)
 

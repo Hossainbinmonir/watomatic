@@ -1,8 +1,5 @@
 package com.parishod.watomatic.activity.notes
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -23,12 +20,14 @@ import com.google.android.material.textfield.TextInputLayout
 import com.parishod.watomatic.R
 import com.parishod.watomatic.activity.BaseActivity
 import com.parishod.watomatic.databinding.ActivityAiNotesBinding
+import com.parishod.watomatic.model.utils.ReportCopyHelper
 import kotlinx.coroutines.launch
 
 class AiNotesActivity : BaseActivity() {
     private lateinit var binding: ActivityAiNotesBinding
     private val viewModel: AiNotesViewModel by viewModels()
     private lateinit var adapter: AiNotesAdapter
+    private var latestUiState: AiNotesUiState = AiNotesUiState()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,9 +61,10 @@ class AiNotesActivity : BaseActivity() {
                 viewModel.setNoteCompleted(noteId, completed)
             },
             onCopyNote = { note ->
-                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                clipboard?.setPrimaryClip(ClipData.newPlainText("AI Note", note.noteText))
-                Toast.makeText(this, R.string.ai_notes_copied_toast, Toast.LENGTH_SHORT).show()
+                val formatted = ReportCopyHelper.formatAiNoteEntry(this, note)
+                if (ReportCopyHelper.copyToClipboard(this, getString(R.string.ai_notes_title), formatted)) {
+                    Toast.makeText(this, R.string.ai_notes_copied_toast, Toast.LENGTH_SHORT).show()
+                }
             },
             onDeleteNote = { note ->
                 viewModel.deleteNote(note.id)
@@ -100,6 +100,13 @@ class AiNotesActivity : BaseActivity() {
 
         binding.fabAddNote.setOnClickListener {
             showAddManualNoteDialog()
+        }
+
+        binding.btnCopyNotesReport.setOnClickListener {
+            val formattedReport = ReportCopyHelper.formatAiNotesReport(this, latestUiState)
+            if (ReportCopyHelper.copyToClipboard(this, getString(R.string.ai_notes_title), formattedReport)) {
+                Toast.makeText(this, R.string.ai_notes_report_copied_toast, Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -149,10 +156,13 @@ class AiNotesActivity : BaseActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.uiState.collect { state ->
+                    latestUiState = state
                     binding.tvPendingNotesCount.text = state.pendingCount.toString()
                     binding.tvCompletedNotesCount.text = state.completedCount.toString()
                     binding.btnClearDoneNotes.visibility =
                         if (state.completedCount > 0) View.VISIBLE else View.GONE
+                    binding.btnCopyNotesReport.visibility =
+                        if (state.displayedNotes.isNotEmpty()) View.VISIBLE else View.GONE
 
                     adapter.submitList(state.displayedNotes)
 

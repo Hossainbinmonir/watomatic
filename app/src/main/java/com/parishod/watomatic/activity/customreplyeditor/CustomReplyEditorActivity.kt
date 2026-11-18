@@ -21,6 +21,7 @@ import com.google.android.material.textfield.TextInputEditText
 import com.parishod.watomatic.R
 import com.parishod.watomatic.activity.BaseActivity
 import com.parishod.watomatic.activity.notes.AiNotesActivity
+import com.parishod.watomatic.model.utils.ReportCopyHelper
 import com.parishod.watomatic.model.CustomRepliesData
 import com.parishod.watomatic.model.ai.AiMemoryDatabase
 import com.parishod.watomatic.model.preferences.PreferencesManager
@@ -49,6 +50,7 @@ class CustomReplyEditorActivity : BaseActivity() {
     private var otherAiExpandedContent: android.view.View? = null
     private var btnOpenAiNotes: MaterialButton? = null
     private var btnOpenAiRulesMemory: MaterialButton? = null
+    private var btnCopyAiStatus: android.widget.ImageButton? = null
 
     private var selectedReplyMethod = REPLY_METHOD_MANUAL
     private var initialSelectedReplyMethod = REPLY_METHOD_MANUAL
@@ -63,7 +65,18 @@ class CustomReplyEditorActivity : BaseActivity() {
                 val systemPrompt = data.getStringExtra("systemPrompt")?.trim()
                 val baseUrl = data.getStringExtra("baseUrl")?.trim()
 
-                if (!apiKey.isNullOrEmpty()) preferencesManager?.saveOpenAIApiKey(apiKey)
+                if (!apiKey.isNullOrEmpty()) {
+                    val saved = preferencesManager?.saveOpenAIApiKeySecurely(apiKey) == true
+                    if (!saved) {
+                        Toast.makeText(
+                            this,
+                            R.string.secure_storage_unavailable_save_error,
+                            Toast.LENGTH_LONG
+                        ).show()
+                        updateCardExpansionState(selectedReplyMethod)
+                        return@registerForActivityResult
+                    }
+                }
                 if (!provider.isNullOrEmpty()) preferencesManager?.saveOpenApiSource(provider)
                 if (!model.isNullOrEmpty()) preferencesManager?.saveSelectedOpenAIModel(model)
                 if (systemPrompt != null) preferencesManager?.saveOpenAICustomPrompt(systemPrompt)
@@ -149,6 +162,7 @@ class CustomReplyEditorActivity : BaseActivity() {
         otherAiExpandedContent = findViewById(R.id.other_ai_expanded_content)
         btnOpenAiNotes = findViewById(R.id.btn_open_ai_notes)
         btnOpenAiRulesMemory = findViewById(R.id.btn_open_ai_rules_memory)
+        btnCopyAiStatus = findViewById(R.id.btn_copy_ai_status)
     }
 
     private fun handleDeepLink() {
@@ -195,6 +209,13 @@ class CustomReplyEditorActivity : BaseActivity() {
             val intent = Intent(this, OtherAiConfigurationActivity::class.java)
             otherAiConfigLauncher.launch(intent)
         }
+
+        btnCopyAiStatus?.setOnClickListener {
+            val statusText = findViewById<TextView>(R.id.other_ai_status_text)?.text?.toString().orEmpty()
+            if (ReportCopyHelper.copyToClipboard(this, getString(R.string.ai_status_copy_desc), statusText)) {
+                Toast.makeText(this, R.string.ai_status_copied_toast, Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun selectReplyMethod(method: String) {
@@ -234,6 +255,14 @@ class CustomReplyEditorActivity : BaseActivity() {
                 preferencesManager?.setEnableByokReplies(false)
             }
             REPLY_METHOD_BYOK -> {
+                if (preferencesManager?.isSecureStorageAvailable != true) {
+                    Toast.makeText(
+                        this,
+                        R.string.secure_storage_unavailable_notice,
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return
+                }
                 val apiKey = preferencesManager?.openAIApiKey?.trim()
                 if (apiKey.isNullOrEmpty() || apiKey == "PENDING_CONFIGURATION") {
                     Toast.makeText(
@@ -298,7 +327,10 @@ class CustomReplyEditorActivity : BaseActivity() {
         if (isByokSelected || hasApiKey) {
             otherAiExpandedContent?.visibility = android.view.View.VISIBLE
             val statusView = findViewById<TextView>(R.id.other_ai_status_text)
-            if (hasApiKey) {
+            if (preferencesManager?.isSecureStorageAvailable != true) {
+                statusView?.text = getString(R.string.secure_storage_unavailable_status)
+                statusView?.setTextColor(ContextCompat.getColor(this@CustomReplyEditorActivity, R.color.rule_danger))
+            } else if (hasApiKey) {
                 val provider = preferencesManager?.openApiSource?.takeIf { it.isNotBlank() } ?: "OpenAI"
                 val model = preferencesManager?.selectedOpenAIModel?.takeIf { it.isNotBlank() } ?: "Default"
                 val lastError = preferencesManager?.openAILastPersistentErrorMessage?.takeIf { it.isNotBlank() }

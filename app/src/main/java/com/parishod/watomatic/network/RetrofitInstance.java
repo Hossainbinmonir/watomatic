@@ -1,6 +1,5 @@
 package com.parishod.watomatic.network;
 
-import com.parishod.watomatic.BuildConfig;
 import com.parishod.watomatic.network.model.atomatic.AtomaticAIErrorResponse;
 import com.parishod.watomatic.network.model.openai.OpenAIErrorResponse;
 
@@ -10,7 +9,6 @@ import java.util.concurrent.TimeUnit;
 
 import okhttp3.OkHttpClient;
 import okhttp3.ResponseBody;
-import okhttp3.logging.HttpLoggingInterceptor;
 import retrofit2.Converter;
 import retrofit2.Retrofit;
 import retrofit2.converter.gson.GsonConverterFactory;
@@ -27,14 +25,7 @@ public class RetrofitInstance {
 
     public static Retrofit getRetrofitInstance() {
         if (retrofit == null) {
-
-            HttpLoggingInterceptor loggingInterceptor = new HttpLoggingInterceptor();
-            if (BuildConfig.DEBUG) {
-                // set your desired log level
-                loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY);
-            }
             OkHttpClient okHttpClient = new OkHttpClient.Builder()
-                    .addInterceptor(loggingInterceptor) // <-- this is the important line!
                     .build();
 
             retrofit = new retrofit2.Retrofit.Builder()
@@ -59,23 +50,7 @@ public class RetrofitInstance {
     }
 
     private static Retrofit createOpenAIRetrofitInstance(String baseUrl) {
-        HttpLoggingInterceptor loggingInterceptor = new HttpLoggingInterceptor();
-        // Check if BuildConfig is accessible, otherwise, remove this DEBUG check for simplicity in this subtask
-        // if (BuildConfig.DEBUG) {
-        //    loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY);
-        // } else {
-        //    loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.NONE);
-        // }
-        // For now, let's set a default or assume DEBUG is available.
-        // If subtask fails due to BuildConfig, will adjust.
-         if (BuildConfig.DEBUG) {
-            loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY);
-         } else {
-            loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.NONE);
-         }
-
         OkHttpClient okHttpClient = new OkHttpClient.Builder()
-                .addInterceptor(loggingInterceptor)
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(40, TimeUnit.SECONDS)
                 .writeTimeout(30, TimeUnit.SECONDS)
@@ -110,23 +85,15 @@ public class RetrofitInstance {
         try {
             return converter.convert(response.errorBody());
         } catch (IOException e) {
-            // Log this error, as it means parsing failed
-            android.util.Log.e("RetrofitInstance", "IOException parsing OpenAI error response", e);
+            // Log error class only without exception message or payload
+            android.util.Log.e("RetrofitInstance", "IOException parsing OpenAI error response (" + e.getClass().getSimpleName() + ")");
             return null;
         }
     }
 
     public static Retrofit getAtomaticAIRetrofitInstance() {
         if (atomaticAIRetrofit == null) {
-            HttpLoggingInterceptor loggingInterceptor = new HttpLoggingInterceptor();
-            if (BuildConfig.DEBUG) {
-                loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY);
-            } else {
-                loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.NONE);
-            }
-
             OkHttpClient okHttpClient = new OkHttpClient.Builder()
-                    .addInterceptor(loggingInterceptor)
                     .connectTimeout(30, TimeUnit.SECONDS)
                     .readTimeout(40, TimeUnit.SECONDS)
                     .writeTimeout(30, TimeUnit.SECONDS)
@@ -159,7 +126,7 @@ public class RetrofitInstance {
         try {
             return converter.convert(response.errorBody());
         } catch (IOException e) {
-            android.util.Log.e("RetrofitInstance", "IOException parsing Atomatic AI error response", e);
+            android.util.Log.e("RetrofitInstance", "IOException parsing Atomatic AI error response (" + e.getClass().getSimpleName() + ")");
             return null;
         }
     }

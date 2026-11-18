@@ -138,6 +138,15 @@
                 tools:text="Last: Rahim • Nov 15, 10:30 AM" />
 
             <ImageButton
+                android:id="@+id/btn_copy_history_item"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/history_copy_entry_desc"
+                android:src="@drawable/ic_content_copy"
+                app:tint="@color/text_secondary" />
+
+            <ImageButton
                 android:id="@+id/btn_delete_history_item"
                 android:layout_width="48dp"
                 android:layout_height="48dp"

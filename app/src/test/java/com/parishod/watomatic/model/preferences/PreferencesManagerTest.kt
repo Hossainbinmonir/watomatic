@@ -1,6 +1,7 @@
 package com.parishod.watomatic.model.preferences
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.preference.PreferenceManager
 import androidx.test.core.app.ApplicationProvider
 import com.parishod.watomatic.model.App
@@ -15,6 +16,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.security.GeneralSecurityException
 import java.util.Locale
 
 @RunWith(RobolectricTestRunner::class)
@@ -28,13 +30,26 @@ class PreferencesManagerTest {
     fun setUp() {
         PreferencesManager.resetInstance()
         context = ApplicationProvider.getApplicationContext()
-        // Clear default shared prefs to get a truly fresh state each test
+        // Clear default shared prefs and test prefs to get a truly fresh state each test
         PreferenceManager.getDefaultSharedPreferences(context).edit().clear().commit()
+        context.getSharedPreferences(PreferencesManager.LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        context.getSharedPreferences(PreferencesManager.SECURE_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        context.getSharedPreferences("test_simulated_encrypted_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
         prefs = PreferencesManager.getPreferencesInstance(context)
     }
 
     @After
     fun tearDown() {
+        PreferenceManager.getDefaultSharedPreferences(context).edit().clear().commit()
+        context.getSharedPreferences(PreferencesManager.LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        context.getSharedPreferences(PreferencesManager.SECURE_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        context.getSharedPreferences("test_simulated_encrypted_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
         PreferencesManager.resetInstance()
     }
 
@@ -861,5 +876,352 @@ class PreferencesManagerTest {
         PreferencesManager.resetInstance()
         prefs = PreferencesManager.getPreferencesInstance(context)
         assertNotNull(prefs)
+    }
+
+    // --- Phase 1 Security Hardening: Encrypted API key storage & legacy migration ---
+
+    private fun simulatedEncryptedPrefs(): SharedPreferences =
+        context.getSharedPreferences("test_simulated_encrypted_prefs", Context.MODE_PRIVATE)
+
+    @Test
+    fun `api key is stored only through encrypted storage and never in plaintext fallback`() {
+        PreferencesManager.resetInstance()
+        val encryptedStore = simulatedEncryptedPrefs()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { encryptedStore }
+        val securePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        assertTrue(securePrefs.isSecureStorageAvailable)
+        val saved = securePrefs.saveOpenAIApiKeySecurely("sk-encrypted-only-secret-123")
+        assertTrue(saved)
+
+        // Stored in encrypted store
+        assertEquals("sk-encrypted-only-secret-123", encryptedStore.getString("pref_openai_api_key", null))
+        // NOT stored in legacy fallback or default preferences
+        val legacyPrefs = context.getSharedPreferences(PreferencesManager.LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE)
+        assertNull(legacyPrefs.getString("pref_openai_api_key", null))
+        assertFalse(legacyPrefs.contains("pref_openai_api_key"))
+        val defaultPrefs = PreferenceManager.getDefaultSharedPreferences(context)
+        assertNull(defaultPrefs.getString("pref_openai_api_key", null))
+    }
+
+    @Test
+    fun `api key can be retrieved after successful storage and across instance reset`() {
+        PreferencesManager.resetInstance()
+        val encryptedStore = simulatedEncryptedPrefs()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { encryptedStore }
+        var securePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        securePrefs.saveOpenAIApiKey("sk-retrieve-test-456")
+        assertEquals("sk-retrieve-test-456", securePrefs.openAIApiKey)
+
+        // Re-initialize singleton with same encrypted backing store
+        PreferencesManager.resetInstance()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { encryptedStore }
+        securePrefs = PreferencesManager.getPreferencesInstance(context)
+        assertEquals("sk-retrieve-test-456", securePrefs.openAIApiKey)
+    }
+
+    @Test
+    fun `api key deletion removes key from encrypted storage`() {
+        PreferencesManager.resetInstance()
+        val encryptedStore = simulatedEncryptedPrefs()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { encryptedStore }
+        val securePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        securePrefs.saveOpenAIApiKey("sk-to-delete-789")
+        assertEquals("sk-to-delete-789", securePrefs.openAIApiKey)
+
+        val deleted = securePrefs.deleteOpenAIApiKeySecurely()
+        assertTrue(deleted)
+        assertNull(securePrefs.openAIApiKey)
+        assertNull(encryptedStore.getString("pref_openai_api_key", null))
+    }
+
+    @Test
+    fun `secure storage initialization failure does not trigger plaintext fallback`() {
+        PreferencesManager.resetInstance()
+        PreferencesManager.setEncryptedPrefsProviderForTesting {
+            throw GeneralSecurityException("Keystore unavailable")
+        }
+        val failingPrefs = PreferencesManager.getPreferencesInstance(context)
+
+        assertFalse(failingPrefs.isSecureStorageAvailable)
+        assertNotNull(failingPrefs.secureStorageError)
+
+        val secretKey = "sk-must-never-hit-plaintext"
+        val saved = failingPrefs.saveOpenAIApiKeySecurely(secretKey)
+        assertFalse(saved)
+        assertNull(failingPrefs.openAIApiKey)
+        assertFalse(failingPrefs.secureStorageError.orEmpty().contains(secretKey))
+
+        val legacyPrefs = context.getSharedPreferences(PreferencesManager.LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE)
+        assertNull(legacyPrefs.getString("pref_openai_api_key", null))
+        assertFalse(legacyPrefs.contains("pref_openai_api_key"))
+    }
+
+    @Test
+    fun `legacy credential migration succeeds and preserves unrelated settings`() {
+        val legacyPrefs = context.getSharedPreferences(PreferencesManager.LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE)
+        legacyPrefs.edit()
+            .putString("pref_openai_api_key", "sk-legacy-migrated-key")
+            .putString("unrelated_legacy_setting", "preserve-value")
+            .commit()
+        PreferenceManager.getDefaultSharedPreferences(context).edit()
+            .putString("pref_fallback_message", "Custom away message")
+            .commit()
+
+        PreferencesManager.resetInstance()
+        val encryptedStore = simulatedEncryptedPrefs()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { encryptedStore }
+        val securePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        assertTrue(securePrefs.isSecureStorageAvailable)
+        assertEquals("sk-legacy-migrated-key", securePrefs.openAIApiKey)
+        assertEquals("sk-legacy-migrated-key", encryptedStore.getString("pref_openai_api_key", null))
+
+        // Migrated plaintext key removed after verification
+        assertFalse(legacyPrefs.contains("pref_openai_api_key"))
+        assertFalse(securePrefs.hasUnmigratedLegacyApiKey())
+        // Unrelated settings preserved
+        assertEquals("preserve-value", legacyPrefs.getString("unrelated_legacy_setting", null))
+        assertEquals("Custom away message", securePrefs.fallbackMessage)
+    }
+
+    @Test
+    fun `legacy credential is not deleted when secure storage is unavailable and recovers when restored`() {
+        val legacyPrefs = context.getSharedPreferences(PreferencesManager.LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE)
+        legacyPrefs.edit().putString("pref_openai_api_key", "sk-legacy-pending-recovery").commit()
+
+        PreferencesManager.resetInstance()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { null }
+        val unavailablePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        // Must NOT silently use plaintext credential and must NOT delete it
+        assertFalse(unavailablePrefs.isSecureStorageAvailable)
+        assertNull(unavailablePrefs.openAIApiKey)
+        assertTrue(unavailablePrefs.hasUnmigratedLegacyApiKey())
+        assertEquals("sk-legacy-pending-recovery", legacyPrefs.getString("pref_openai_api_key", null))
+
+        // Recover secure storage and verify safe migration completes
+        val encryptedStore = simulatedEncryptedPrefs()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { encryptedStore }
+        assertTrue(unavailablePrefs.retrySecureStorageInitialization())
+        assertEquals("sk-legacy-pending-recovery", unavailablePrefs.openAIApiKey)
+        assertFalse(legacyPrefs.contains("pref_openai_api_key"))
+    }
+
+    @Test
+    fun `legacy credential is not deleted when encrypted write verification fails`() {
+        val legacyPrefs = context.getSharedPreferences(PreferencesManager.LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE)
+        legacyPrefs.edit().putString("pref_openai_api_key", "sk-legacy-verify-fail").commit()
+
+        // Fake encrypted prefs whose commit() fails so verification cannot succeed
+        val failingCommitEditor = object : SharedPreferences.Editor {
+            override fun putString(key: String?, value: String?): SharedPreferences.Editor = this
+            override fun putStringSet(key: String?, values: MutableSet<String>?): SharedPreferences.Editor = this
+            override fun putInt(key: String?, value: Int): SharedPreferences.Editor = this
+            override fun putLong(key: String?, value: Long): SharedPreferences.Editor = this
+            override fun putFloat(key: String?, value: Float): SharedPreferences.Editor = this
+            override fun putBoolean(key: String?, value: Boolean): SharedPreferences.Editor = this
+            override fun remove(key: String?): SharedPreferences.Editor = this
+            override fun clear(): SharedPreferences.Editor = this
+            override fun commit(): Boolean = false
+            override fun apply() {}
+        }
+        val failingEncryptedPrefs = org.mockito.Mockito.mock(SharedPreferences::class.java)
+        org.mockito.Mockito.`when`(failingEncryptedPrefs.getString("pref_openai_api_key", null)).thenReturn(null)
+        org.mockito.Mockito.`when`(failingEncryptedPrefs.edit()).thenReturn(failingCommitEditor)
+
+        PreferencesManager.resetInstance()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { failingEncryptedPrefs }
+        val securePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        assertFalse(securePrefs.isSecureStorageAvailable)
+        assertNull(securePrefs.openAIApiKey)
+        // Plaintext legacy key must remain intact for future recovery
+        assertEquals("sk-legacy-verify-fail", legacyPrefs.getString("pref_openai_api_key", null))
+    }
+
+    @Test
+    fun `existing secure credentials are not destroyed during initialization failure`() {
+        val encryptedStore = simulatedEncryptedPrefs()
+        encryptedStore.edit().putString("pref_openai_api_key", "sk-existing-encrypted-key").commit()
+
+        // Also seed watomatic_secure_prefs to verify constructor never clears the underlying prefs file
+        val rawSecureFile = context.getSharedPreferences(PreferencesManager.SECURE_PREFS_NAME, Context.MODE_PRIVATE)
+        rawSecureFile.edit().putString("encrypted_blob_sentinel", "do-not-wipe").commit()
+
+        // Simulate initialization failure
+        PreferencesManager.resetInstance()
+        PreferencesManager.setEncryptedPrefsProviderForTesting {
+            throw GeneralSecurityException("Transient keystore lock")
+        }
+        val failedInitPrefs = PreferencesManager.getPreferencesInstance(context)
+        assertFalse(failedInitPrefs.isSecureStorageAvailable)
+        assertNull(failedInitPrefs.openAIApiKey)
+
+        // Underlying prefs file and encrypted credential must remain untouched
+        assertEquals("do-not-wipe", rawSecureFile.getString("encrypted_blob_sentinel", null))
+        assertEquals("sk-existing-encrypted-key", encryptedStore.getString("pref_openai_api_key", null))
+
+        // Recovering keystore restores access to existing credential
+        PreferencesManager.setEncryptedPrefsProviderForTesting { encryptedStore }
+        assertTrue(failedInitPrefs.retrySecureStorageInitialization())
+        assertEquals("sk-existing-encrypted-key", failedInitPrefs.openAIApiKey)
+    }
+
+    @Test
+    fun `legacy migration preserves existing encrypted credential instead of overwriting it`() {
+        val encryptedStore = simulatedEncryptedPrefs()
+        encryptedStore.edit().putString("pref_openai_api_key", "sk-newer-encrypted-key").commit()
+
+        val legacyPrefs = context.getSharedPreferences(PreferencesManager.LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE)
+        legacyPrefs.edit().putString("pref_openai_api_key", "sk-older-legacy-key").commit()
+
+        PreferencesManager.resetInstance()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { encryptedStore }
+        val securePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        assertEquals("sk-newer-encrypted-key", securePrefs.openAIApiKey)
+        assertFalse(legacyPrefs.contains("pref_openai_api_key"))
+    }
+
+    @Test
+    fun `saveOpenAIApiKeySecurely returns false and marks storage unavailable when commit returns false`() {
+        val failingCommitEditor = object : SharedPreferences.Editor {
+            override fun putString(key: String?, value: String?): SharedPreferences.Editor = this
+            override fun putStringSet(key: String?, values: MutableSet<String>?): SharedPreferences.Editor = this
+            override fun putInt(key: String?, value: Int): SharedPreferences.Editor = this
+            override fun putLong(key: String?, value: Long): SharedPreferences.Editor = this
+            override fun putFloat(key: String?, value: Float): SharedPreferences.Editor = this
+            override fun putBoolean(key: String?, value: Boolean): SharedPreferences.Editor = this
+            override fun remove(key: String?): SharedPreferences.Editor = this
+            override fun clear(): SharedPreferences.Editor = this
+            override fun commit(): Boolean = false
+            override fun apply() {}
+        }
+        val encryptedStore = simulatedEncryptedPrefs()
+        val spyStore = object : SharedPreferences by encryptedStore {
+            override fun edit(): SharedPreferences.Editor = failingCommitEditor
+        }
+
+        PreferencesManager.resetInstance()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { spyStore }
+        val securePrefs = PreferencesManager.getPreferencesInstance(context)
+        assertTrue(securePrefs.isSecureStorageAvailable)
+
+        val secretKey = "sk-commit-false-secret"
+        assertFalse(securePrefs.saveOpenAIApiKeySecurely(secretKey))
+        assertFalse(securePrefs.isSecureStorageAvailable)
+        assertNotNull(securePrefs.secureStorageError)
+        assertFalse(securePrefs.secureStorageError.orEmpty().contains(secretKey))
+        assertNull(securePrefs.openAIApiKey)
+        val legacyPrefs = context.getSharedPreferences(PreferencesManager.LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE)
+        assertFalse(legacyPrefs.contains("pref_openai_api_key"))
+    }
+
+    @Test
+    fun `saveOpenAIApiKeySecurely returns false and marks storage unavailable when read-back mismatches`() {
+        val backing = simulatedEncryptedPrefs()
+        val mismatchingEditor = object : SharedPreferences.Editor {
+            override fun putString(key: String?, value: String?): SharedPreferences.Editor = this
+            override fun putStringSet(key: String?, values: MutableSet<String>?): SharedPreferences.Editor = this
+            override fun putInt(key: String?, value: Int): SharedPreferences.Editor = this
+            override fun putLong(key: String?, value: Long): SharedPreferences.Editor = this
+            override fun putFloat(key: String?, value: Float): SharedPreferences.Editor = this
+            override fun putBoolean(key: String?, value: Boolean): SharedPreferences.Editor = this
+            override fun remove(key: String?): SharedPreferences.Editor = this
+            override fun clear(): SharedPreferences.Editor = this
+            override fun commit(): Boolean {
+                // Commit claims true, but corrupts stored value so read-back mismatches
+                backing.edit().putString("pref_openai_api_key", "corrupted-value").commit()
+                return true
+            }
+            override fun apply() {}
+        }
+        val storeWithCorruptWrite = object : SharedPreferences by backing {
+            override fun edit(): SharedPreferences.Editor = mismatchingEditor
+        }
+
+        PreferencesManager.resetInstance()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { storeWithCorruptWrite }
+        val securePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        val secretKey = "sk-expected-secret-key"
+        assertFalse(securePrefs.saveOpenAIApiKeySecurely(secretKey))
+        assertFalse(securePrefs.isSecureStorageAvailable)
+        assertNotNull(securePrefs.secureStorageError)
+        assertFalse(securePrefs.secureStorageError.orEmpty().contains(secretKey))
+        assertNull(securePrefs.openAIApiKey)
+        val legacyPrefs = context.getSharedPreferences(PreferencesManager.LEGACY_FALLBACK_PREFS_NAME, Context.MODE_PRIVATE)
+        assertFalse(legacyPrefs.contains("pref_openai_api_key"))
+    }
+
+    @Test
+    fun `saveOpenAIApiKeySecurely returns false when write throws exception`() {
+        val backing = simulatedEncryptedPrefs()
+        val throwingStore = object : SharedPreferences by backing {
+            override fun edit(): SharedPreferences.Editor {
+                throw SecurityException("Keystore write failure for secret payload")
+            }
+        }
+
+        PreferencesManager.resetInstance()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { throwingStore }
+        val securePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        val secretKey = "sk-exception-secret-key"
+        assertFalse(securePrefs.saveOpenAIApiKeySecurely(secretKey))
+        assertFalse(securePrefs.isSecureStorageAvailable)
+        assertNotNull(securePrefs.secureStorageError)
+        assertFalse(securePrefs.secureStorageError.orEmpty().contains("secret payload"))
+        assertFalse(securePrefs.secureStorageError.orEmpty().contains(secretKey))
+        assertNull(securePrefs.openAIApiKey)
+    }
+
+    @Test
+    fun `saveOpenAIApiKeySecurely rejects empty or whitespace keys without polluting secureStorageError`() {
+        PreferencesManager.resetInstance()
+        val encryptedStore = simulatedEncryptedPrefs()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { encryptedStore }
+        val securePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        assertFalse(securePrefs.saveOpenAIApiKeySecurely(""))
+        assertFalse(securePrefs.saveOpenAIApiKeySecurely("   "))
+        assertFalse(securePrefs.saveOpenAIApiKeySecurely(null))
+        assertTrue(securePrefs.isSecureStorageAvailable)
+        assertNull(securePrefs.secureStorageError)
+        assertNull(securePrefs.openAIApiKey)
+    }
+
+    @Test
+    fun `retrySecureStorageInitialization clears stale error after commit failure recovery`() {
+        val backing = simulatedEncryptedPrefs()
+        var failCommit = true
+        val toggleableEditor = object : SharedPreferences.Editor by backing.edit() {
+            override fun putString(key: String?, value: String?): SharedPreferences.Editor {
+                if (!failCommit) {
+                    backing.edit().putString(key, value).commit()
+                }
+                return this
+            }
+            override fun commit(): Boolean = !failCommit
+        }
+        val toggleableStore = object : SharedPreferences by backing {
+            override fun edit(): SharedPreferences.Editor = if (failCommit) toggleableEditor else backing.edit()
+        }
+
+        PreferencesManager.resetInstance()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { toggleableStore }
+        val securePrefs = PreferencesManager.getPreferencesInstance(context)
+
+        assertFalse(securePrefs.saveOpenAIApiKeySecurely("sk-transient-fail"))
+        assertFalse(securePrefs.isSecureStorageAvailable)
+        assertNotNull(securePrefs.secureStorageError)
+
+        failCommit = false
+        assertTrue(securePrefs.retrySecureStorageInitialization())
+        assertTrue(securePrefs.isSecureStorageAvailable)
+        assertNull(securePrefs.secureStorageError)
     }
 }

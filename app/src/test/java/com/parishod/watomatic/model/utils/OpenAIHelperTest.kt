@@ -1,5 +1,9 @@
 package com.parishod.watomatic.model.utils
 
+import android.content.Context
+import androidx.preference.PreferenceManager
+import androidx.test.core.app.ApplicationProvider
+import com.parishod.watomatic.model.preferences.PreferencesManager
 import com.parishod.watomatic.network.model.openai.ModelData
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -11,6 +15,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLog
 import java.lang.reflect.Field
 
 /**
@@ -30,11 +35,15 @@ class OpenAIHelperTest {
     @Before
     fun setUp() {
         OpenAIHelper.invalidateCache()
+        ShadowLog.clear()
+        PreferencesManager.resetInstance()
     }
 
     @After
     fun tearDown() {
         OpenAIHelper.invalidateCache()
+        PreferencesManager.resetInstance()
+        ShadowLog.clear()
     }
 
     // --- getCachedModels ---
@@ -136,5 +145,36 @@ class OpenAIHelperTest {
         val field: Field = OpenAIHelper::class.java.getDeclaredField("lastModelsFetchTimeMillis")
         field.isAccessible = true
         field.setLong(null, timeMillis)
+    }
+
+    @Test
+    fun `fetchModels never logs customApiUrl or credentials`() {
+        val context: Context = ApplicationProvider.getApplicationContext()
+        val encryptedStore = context.getSharedPreferences("test_openai_helper_prefs", Context.MODE_PRIVATE)
+        encryptedStore.edit().clear().commit()
+        PreferenceManager.getDefaultSharedPreferences(context).edit().clear().commit()
+        PreferencesManager.setEncryptedPrefsProviderForTesting { encryptedStore }
+
+        val prefs = PreferencesManager.getPreferencesInstance(context)
+        prefs.saveOpenAIApiKey("sk-helper-secret-999")
+        prefs.saveOpenApiSource(Constants.CUSTOM_AI_PROVIDER_NAME)
+        val sensitiveCustomUrl = "https://user:secretpass@custom-llm.internal.invalid/v1?api_token=tok999"
+        prefs.saveCustomOpenAIApiUrl(sensitiveCustomUrl)
+
+        ShadowLog.clear()
+        try {
+            OpenAIHelper.fetchModels(context, null)
+        } catch (_: IllegalArgumentException) {
+            // URL with query may be rejected by Retrofit; check logs regardless
+        }
+
+        val logs = ShadowLog.getLogsForTag("OpenAIHelper").joinToString("\n") { it.msg ?: "" }
+        assertFalse("Log must not contain custom URL", logs.contains("custom-llm.internal.invalid"))
+        assertFalse("Log must not contain credentials", logs.contains("secretpass"))
+        assertFalse("Log must not contain query token", logs.contains("tok999"))
+        assertFalse("Log must not contain API key", logs.contains("sk-helper-secret-999"))
+
+        encryptedStore.edit().clear().commit()
+        PreferenceManager.getDefaultSharedPreferences(context).edit().clear().commit()
     }
 }

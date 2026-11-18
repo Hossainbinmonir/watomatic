@@ -4,7 +4,6 @@ import static com.parishod.watomatic.model.utils.Constants.CUSTOM_AI_PROVIDER_NA
 import static com.parishod.watomatic.model.utils.Constants.DEFAULT_LLM_MODEL;
 import static com.parishod.watomatic.model.utils.Constants.DEFAULT_LLM_PROMPT;
 
-import android.app.PendingIntent;
 import android.content.res.Resources;
 import android.content.ComponentName;
 import android.content.Intent;
@@ -22,7 +21,7 @@ import com.parishod.watomatic.model.utils.Constants;
 
 
 import androidx.annotation.NonNull;
-import androidx.core.app.RemoteInput;
+import androidx.annotation.VisibleForTesting;
 
 import com.parishod.watomatic.NotificationWear;
 import com.parishod.watomatic.R;
@@ -46,6 +45,10 @@ import com.parishod.watomatic.model.rules.AutoReplyRule;
 import com.parishod.watomatic.service.ai.AiPolicyDecision;
 import com.parishod.watomatic.service.ai.AiPromptAndPolicyHelper;
 import com.parishod.watomatic.service.ai.ParsedAiResponse;
+import com.parishod.watomatic.service.reply.ReplyAttempt;
+import com.parishod.watomatic.service.reply.ReplyExecutionManager;
+import com.parishod.watomatic.service.reply.ReplyExecutionResult;
+import com.parishod.watomatic.service.reply.ReplySourceType;
 import com.parishod.watomatic.service.rules.RuleNotificationProcessor;
 
 import java.util.ArrayList;
@@ -65,6 +68,26 @@ public class NotificationService extends NotificationListenerService {
     private NotificationReplyDecider replyDecider;
     private RuleNotificationProcessor ruleNotificationProcessor;
     private ExecutorService aiMemoryExecutor;
+    private volatile ReplyExecutionManager replyExecutionManager;
+
+    private synchronized DbUtils getDbUtils() {
+        if (dbUtils == null) {
+            dbUtils = new DbUtils(getApplicationContext());
+        }
+        return dbUtils;
+    }
+
+    synchronized ReplyExecutionManager getReplyExecutionManager() {
+        if (replyExecutionManager == null) {
+            replyExecutionManager = new ReplyExecutionManager(getApplicationContext());
+        }
+        return replyExecutionManager;
+    }
+
+    @VisibleForTesting
+    synchronized void setReplyExecutionManagerForTesting(ReplyExecutionManager manager) {
+        this.replyExecutionManager = manager;
+    }
 
     private ExecutorService getAiMemoryExecutor() {
         if (aiMemoryExecutor == null || aiMemoryExecutor.isShutdown()) {
@@ -75,12 +98,9 @@ public class NotificationService extends NotificationListenerService {
 
     private NotificationReplyDecider getReplyDecider() {
         if (replyDecider == null) {
-            if (dbUtils == null) {
-                dbUtils = new DbUtils(getApplicationContext());
-            }
             replyDecider = new NotificationReplyDecider(
                     PreferencesManager.getPreferencesInstance(this),
-                    dbUtils,
+                    getDbUtils(),
                     ContactsHelper.Companion.getInstance(this));
         }
         return replyDecider;
@@ -112,7 +132,7 @@ public class NotificationService extends NotificationListenerService {
                     dispatchRuleAiReply(statusBarNotification, notificationWear, matchedRule);
                 } else {
                     Log.d(TAG, "Rule matched (" + matchedRule.getName() + "), dispatching reply.");
-                    sendActualReply(statusBarNotification, notificationWear, replyText, matchedRule.getName());
+                    sendActualReply(statusBarNotification, notificationWear, replyText, matchedRule.getName(), ReplySourceType.RULE_STATIC);
                 }
             }
 
@@ -192,48 +212,62 @@ public class NotificationService extends NotificationListenerService {
         return null;
     }
 
-    private void sendActualReply(StatusBarNotification sbn, NotificationWear notificationWear, String replyText) {
-        sendActualReply(sbn, notificationWear, replyText, null);
+    ReplyExecutionResult sendActualReply(StatusBarNotification sbn, NotificationWear notificationWear, String replyText) {
+        return sendActualReply(sbn, notificationWear, replyText, null, ReplySourceType.DEFAULT);
     }
 
-    private void sendActualReply(StatusBarNotification sbn, NotificationWear notificationWear, String replyText, String ruleOrSourceName) {
-        RemoteInput finalRemoteIn = null;
-        Intent localIntent = new Intent();
-        localIntent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-        Bundle localBundle = new Bundle();
-        for (RemoteInput remoteIn : notificationWear.getRemoteInputs()) {
-            if(remoteIn.getAllowFreeFormInput()) {
-                finalRemoteIn = remoteIn;
-                localBundle.putCharSequence(finalRemoteIn.getResultKey(), replyText);
-                break;
+    ReplyExecutionResult sendActualReply(StatusBarNotification sbn, NotificationWear notificationWear, String replyText, String ruleOrSourceName) {
+        return sendActualReply(sbn, notificationWear, replyText, ruleOrSourceName, ReplySourceType.DEFAULT);
+    }
+
+    ReplyExecutionResult sendActualReply(
+            StatusBarNotification sbn,
+            NotificationWear notificationWear,
+            String replyText,
+            String ruleOrSourceName,
+            ReplySourceType sourceType
+    ) {
+        String sourceLabel = ruleOrSourceName != null ? ruleOrSourceName : getString(R.string.history_source_default);
+        String packageName = (sbn != null && sbn.getPackageName() != null) ? sbn.getPackageName() : "";
+        String notificationKey = (sbn != null) ? sbn.getKey() : null;
+        ReplySourceType resolvedSourceType = sourceType != null ? sourceType : ReplySourceType.DEFAULT;
+
+        ReplyAttempt attempt = ReplyAttempt.create(
+                resolvedSourceType,
+                sourceLabel,
+                packageName,
+                notificationKey,
+                replyText
+        );
+
+        ReplyExecutionResult result = getReplyExecutionManager().executeReply(attempt, notificationWear);
+        if (result.isDispatched()) {
+            DbUtils db = getDbUtils();
+            String incomingMsg = extractIncomingMessage(sbn);
+            db.logReply(sbn, NotificationUtils.getTitle(sbn), incomingMsg, replyText, sourceLabel);
+
+            if (PreferencesManager.getPreferencesInstance(this).isShowNotificationEnabled()) {
+                Bundle extras = (sbn != null && sbn.getNotification() != null) ? sbn.getNotification().extras : null;
+                String notifTitle = extras != null ? extras.getString("android.title") : NotificationUtils.getTitle(sbn);
+                String notifText = extras != null ? extras.getString("android.text") : incomingMsg;
+                NotificationHelper.getInstance(getApplicationContext()).sendNotification(notifTitle, notifText, packageName);
             }
-        }
-
-        if(finalRemoteIn == null) return;
-
-        RemoteInput.addResultsToIntent(new RemoteInput[]{ finalRemoteIn }, localIntent, localBundle);
-        try {
-            if (notificationWear.getPendingIntent() != null) {
-                if (dbUtils == null) {
-                    dbUtils = new DbUtils(getApplicationContext());
-                }
-                String incomingMsg = extractIncomingMessage(sbn);
-                String sourceLabel = ruleOrSourceName != null ? ruleOrSourceName : getString(R.string.history_source_default);
-                dbUtils.logReply(sbn, NotificationUtils.getTitle(sbn), incomingMsg, replyText, sourceLabel);
-
-                notificationWear.getPendingIntent().send(this, 0, localIntent);
-                if (PreferencesManager.getPreferencesInstance(this).isShowNotificationEnabled()) {
-                    NotificationHelper.getInstance(getApplicationContext()).sendNotification(sbn.getNotification().extras.getString("android.title"), sbn.getNotification().extras.getString("android.text"), sbn.getPackageName());
-                }
-                cancelNotification(sbn.getKey());
-                if (canPurgeMessages()) {
-                    dbUtils.purgeMessageLogs();
-                    PreferencesManager.getPreferencesInstance(this).setPurgeMessageTime(System.currentTimeMillis());
+            if (notificationKey != null) {
+                try {
+                    cancelNotification(notificationKey);
+                } catch (Exception e) {
+                    Log.w(TAG, "Unable to cancel notification (" + e.getClass().getSimpleName() + ")");
                 }
             }
-        } catch (PendingIntent.CanceledException e) {
-            Log.e(TAG, "sendActualReply error: " + e.getLocalizedMessage());
+            if (canPurgeMessages()) {
+                db.purgeMessageLogs();
+                PreferencesManager.getPreferencesInstance(this).setPurgeMessageTime(System.currentTimeMillis());
+            }
+        } else {
+            Log.w(TAG, "Reply dispatch not completed: status=" + result.getStatus()
+                    + ", category=" + result.getFailureCategory());
         }
+        return result;
     }
 
     private void dispatchRuleAiReply(
@@ -250,7 +284,7 @@ public class NotificationService extends NotificationListenerService {
         String apiKey = prefs.getOpenAIApiKey();
         boolean hasApiKey = apiKey != null && !apiKey.trim().isEmpty() && !"PENDING_CONFIGURATION".equals(apiKey);
         if (!hasApiKey || incomingMessage == null || incomingMessage.trim().isEmpty()) {
-            sendActualReply(sbn, notificationWear, fallback, matchedRule.getName());
+            sendActualReply(sbn, notificationWear, fallback, matchedRule.getName(), ReplySourceType.AI_FALLBACK);
             return;
         }
 
@@ -316,7 +350,7 @@ public class NotificationService extends NotificationListenerService {
             );
         } else {
             Log.d(TAG, "AI conditions not met. Using default reply.");
-            sendActualReply(sbn, notificationWear, fallbackReplyText);
+            sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.DEFAULT);
         }
     }
 
@@ -371,7 +405,7 @@ public class NotificationService extends NotificationListenerService {
                 if (decision != AiPolicyDecision.ALLOWED) {
                     Log.d(TAG, "AI reply blocked by global AI policy: " + decision + " for " + senderDisplay);
                     if (decision != AiPolicyDecision.BLOCKED_GROUP_FILTER && !prefs.isAiSkipWhenLimitReached()) {
-                        sendActualReply(sbn, notificationWear, fallbackReplyText);
+                        sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.AI_FALLBACK);
                     }
                     return;
                 }
@@ -419,24 +453,74 @@ public class NotificationService extends NotificationListenerService {
         return DEFAULT_LLM_MODEL;
     }
 
-    private void recordAiError(PreferencesManager prefs, String errorDetail) {
-        prefs.saveOpenAILastPersistentError(errorDetail, System.currentTimeMillis());
+    private static final java.util.regex.Pattern SAFE_HTTP_ERROR_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "^HTTP [1-5][0-9]{2} \\((Bad request|Authentication failed|Access denied|Endpoint or model not found|Request timeout|Rate limit or quota exceeded|Provider server error|Provider request failed)\\)$"
+            );
+    private static final java.util.regex.Pattern SAFE_NETWORK_ERROR_PATTERN =
+            java.util.regex.Pattern.compile("^Network error \\([A-Za-z0-9_$]{1,64}\\)$");
+    private static final java.util.regex.Pattern SAFE_STORAGE_EXCEPTION_PATTERN =
+            java.util.regex.Pattern.compile("^Secure encrypted credential storage is unavailable \\([A-Za-z0-9_$]{1,64}\\)\\.$");
+
+    static String sanitizeErrorMessageForPersistence(String errorDetail) {
+        if (errorDetail == null || errorDetail.trim().isEmpty()) {
+            return "AI request failed";
+        }
+        String candidate = errorDetail.trim();
+        if ("API key unavailable".equals(candidate)
+                || "Empty AI response".equals(candidate)
+                || "Empty Claude response".equals(candidate)
+                || "Empty Gemini response".equals(candidate)
+                || "Provider request failed".equals(candidate)
+                || "AI request failed".equals(candidate)
+                || "Secure encrypted credential storage is unavailable on this device.".equals(candidate)
+                || "Failed to migrate legacy API key to secure storage.".equals(candidate)
+                || "Failed to verify migrated API key in secure storage.".equals(candidate)
+                || "Failed to commit API key to secure storage.".equals(candidate)
+                || "Failed to verify API key in secure storage.".equals(candidate)
+                || "Failed to write API key to secure storage.".equals(candidate)
+                || "Failed to read API key from secure storage.".equals(candidate)
+                || "Failed to delete API key from secure storage.".equals(candidate)) {
+            return candidate;
+        }
+        if (SAFE_HTTP_ERROR_PATTERN.matcher(candidate).matches()
+                || SAFE_NETWORK_ERROR_PATTERN.matcher(candidate).matches()
+                || SAFE_STORAGE_EXCEPTION_PATTERN.matcher(candidate).matches()) {
+            return candidate;
+        }
+        return "Provider request failed";
     }
 
-    private String extractErrorSnippet(Response<?> response) {
-        String msg = "HTTP " + response.code();
-        try {
-            if (response.errorBody() != null) {
-                String body = response.errorBody().string();
-                if (body != null && !body.trim().isEmpty()) {
-                    body = body.trim().replaceAll("\\s+", " ");
-                    if (body.length() > 140) body = body.substring(0, 140) + "...";
-                    msg = msg + ": " + body;
-                }
-            }
-        } catch (Exception ignored) {
+    private void recordAiError(PreferencesManager prefs, String errorDetail) {
+        prefs.saveOpenAILastPersistentError(sanitizeErrorMessageForPersistence(errorDetail), System.currentTimeMillis());
+    }
+
+    static String formatSafeHttpError(Response<?> response) {
+        if (response == null) {
+            return "Provider request failed";
         }
-        return msg;
+        return formatSafeHttpError(response.code());
+    }
+
+    static String formatSafeHttpError(int code) {
+        if (code < 100 || code > 599) {
+            return "Provider request failed";
+        } else if (code == 400) {
+            return "HTTP 400 (Bad request)";
+        } else if (code == 401) {
+            return "HTTP 401 (Authentication failed)";
+        } else if (code == 403) {
+            return "HTTP 403 (Access denied)";
+        } else if (code == 404) {
+            return "HTTP 404 (Endpoint or model not found)";
+        } else if (code == 408) {
+            return "HTTP 408 (Request timeout)";
+        } else if (code == 429) {
+            return "HTTP 429 (Rate limit or quota exceeded)";
+        } else if (code >= 500) {
+            return "HTTP " + code + " (Provider server error)";
+        }
+        return "HTTP " + code + " (Provider request failed)";
     }
 
     private void fetchAiReply(
@@ -457,13 +541,21 @@ public class NotificationService extends NotificationListenerService {
         PreferencesManager prefs = PreferencesManager.getPreferencesInstance(this);
 
         if (ruleSpecificGuidance == null && !prefs.isByokRepliesEnabled()) {
-            sendActualReply(sbn, notificationWear, fallbackReplyText);
+            sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.AI_FALLBACK);
             return;
         }
 
         Log.d(TAG, "Using BYOK backend with memoryTurns=" + historyAsc.size() + ", notesEnabled=" + notesEnabled);
         String apiKey = prefs.getOpenAIApiKey();
         if (apiKey != null) apiKey = apiKey.trim();
+        if (!prefs.isSecureStorageAvailable() || apiKey == null || apiKey.isEmpty() || "PENDING_CONFIGURATION".equals(apiKey)) {
+            Log.w(TAG, "Aborting AI request: API key unavailable or secure storage inaccessible.");
+            recordAiError(prefs, prefs.getSecureStorageError() != null
+                    ? prefs.getSecureStorageError()
+                    : "API key unavailable");
+            sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.AI_FALLBACK);
+            return;
+        }
         String provider = prefs.getOpenApiSource();
         if (provider == null || provider.trim().isEmpty()) {
             provider = "OpenAI";
@@ -554,7 +646,11 @@ public class NotificationService extends NotificationListenerService {
         String finalReply = parsed.getCleanReply();
         List<String> extractedNotes = parsed.getExtractedNotes();
 
-        sendActualReply(sbn, notificationWear, finalReply, historySourceLabel);
+        String globalAiLabel = getString(R.string.history_source_ai);
+        ReplySourceType aiSourceType = (historySourceLabel != null && !historySourceLabel.equals(globalAiLabel))
+                ? ReplySourceType.RULE_AI
+                : ReplySourceType.GLOBAL_AI;
+        sendActualReply(sbn, notificationWear, finalReply, historySourceLabel, aiSourceType);
 
         getAiMemoryExecutor().execute(() -> {
             try {
@@ -582,7 +678,7 @@ public class NotificationService extends NotificationListenerService {
                     Log.i(TAG, "Saved " + extractedNotes.size() + " AI note(s) from " + senderDisplay);
                 }
             } catch (Exception e) {
-                Log.e(TAG, "Failed persisting AI memory/notes", e);
+                Log.e(TAG, "Failed persisting AI memory/notes (" + e.getClass().getSimpleName() + ")");
             }
         });
     }
@@ -641,20 +737,20 @@ public class NotificationService extends NotificationListenerService {
                             }
                         }
                     } catch (Exception e) {
-                        Log.e(TAG, "Error parsing Claude response", e);
+                        Log.e(TAG, "Error parsing Claude response (" + e.getClass().getSimpleName() + ")");
                     }
                 }
-                String err = response.isSuccessful() ? "Empty Claude response" : extractErrorSnippet(response);
+                String err = response.isSuccessful() ? "Empty Claude response" : formatSafeHttpError(response);
                 Log.e(TAG, "Claude API failed: " + err);
                 recordAiError(prefs, err);
-                sendActualReply(sbn, notificationWear, fallbackReplyText);
+                sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.AI_FALLBACK);
             }
 
             @Override
             public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
-                Log.e(TAG, "Claude API network error", t);
-                recordAiError(prefs, t.getLocalizedMessage() != null ? t.getLocalizedMessage() : "Network error");
-                sendActualReply(sbn, notificationWear, fallbackReplyText);
+                Log.e(TAG, "Claude API network error (" + t.getClass().getSimpleName() + ")");
+                recordAiError(prefs, "Network error (" + t.getClass().getSimpleName() + ")");
+                sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.AI_FALLBACK);
             }
         });
     }
@@ -741,20 +837,20 @@ public class NotificationService extends NotificationListenerService {
                             }
                         }
                     } catch (Exception e) {
-                        Log.e(TAG, "Error parsing Gemini response", e);
+                        Log.e(TAG, "Error parsing Gemini response (" + e.getClass().getSimpleName() + ")");
                     }
                 }
-                String err = response.isSuccessful() ? "Empty Gemini response" : extractErrorSnippet(response);
+                String err = response.isSuccessful() ? "Empty Gemini response" : formatSafeHttpError(response);
                 Log.e(TAG, "Gemini API failed: " + err);
                 recordAiError(prefs, err);
-                sendActualReply(sbn, notificationWear, fallbackReplyText);
+                sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.AI_FALLBACK);
             }
 
             @Override
             public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
-                Log.e(TAG, "Gemini API network error", t);
-                recordAiError(prefs, t.getLocalizedMessage() != null ? t.getLocalizedMessage() : "Network error");
-                sendActualReply(sbn, notificationWear, fallbackReplyText);
+                Log.e(TAG, "Gemini API network error (" + t.getClass().getSimpleName() + ")");
+                recordAiError(prefs, "Network error (" + t.getClass().getSimpleName() + ")");
+                sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.AI_FALLBACK);
             }
         });
     }
@@ -791,7 +887,7 @@ public class NotificationService extends NotificationListenerService {
 
                     String aiReply = response.body().getChoices().get(0).getMessage().getContent().trim();
                     if (!aiReply.isEmpty()) {
-                        Log.i(TAG, "OpenAI/Compatible successful response: " + aiReply);
+                        Log.i(TAG, "OpenAI/Compatible successful response received.");
                         handleSuccessfulAiReply(
                                 prefs, sbn, notificationWear, packageName, senderKey, senderDisplay,
                                 incomingMessage, aiReply, memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel
@@ -799,17 +895,17 @@ public class NotificationService extends NotificationListenerService {
                         return;
                     }
                 }
-                String err = response.isSuccessful() ? "Empty AI response" : extractErrorSnippet(response);
+                String err = response.isSuccessful() ? "Empty AI response" : formatSafeHttpError(response);
                 Log.e(TAG, "OpenAI/Compatible API failed: " + err);
                 recordAiError(prefs, err);
-                sendActualReply(sbn, notificationWear, fallbackReplyText);
+                sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.AI_FALLBACK);
             }
 
             @Override
             public void onFailure(@NonNull Call<OpenAIResponse> call, @NonNull Throwable t) {
-                Log.e(TAG, "OpenAI/Compatible API network error", t);
-                recordAiError(prefs, t.getLocalizedMessage() != null ? t.getLocalizedMessage() : "Network error");
-                sendActualReply(sbn, notificationWear, fallbackReplyText);
+                Log.e(TAG, "OpenAI/Compatible API network error (" + t.getClass().getSimpleName() + ")");
+                recordAiError(prefs, "Network error (" + t.getClass().getSimpleName() + ")");
+                sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.AI_FALLBACK);
             }
         });
     }
@@ -836,6 +932,10 @@ public class NotificationService extends NotificationListenerService {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        if (replyExecutionManager != null) {
+            replyExecutionManager.shutdown();
+            replyExecutionManager = null;
+        }
         if (ruleNotificationProcessor != null) {
             ruleNotificationProcessor.shutdown();
             ruleNotificationProcessor = null;

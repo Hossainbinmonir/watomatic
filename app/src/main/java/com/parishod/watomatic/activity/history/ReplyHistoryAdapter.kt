@@ -14,6 +14,7 @@ import java.text.DateFormat
 import java.util.Date
 
 class ReplyHistoryAdapter(
+    private val onCopyEntry: (ReplyHistoryRow) -> Unit = {},
     private val onDeleteEntry: (Int) -> Unit
 ) : ListAdapter<ReplyHistoryRow, ReplyHistoryAdapter.HistoryViewHolder>(DiffCallback()) {
 
@@ -38,6 +39,7 @@ class ReplyHistoryAdapter(
         private val tvIncomingMsg: TextView = itemView.findViewById(R.id.tv_history_incoming_msg)
         private val tvRepliedMsg: TextView = itemView.findViewById(R.id.tv_history_replied_msg)
         private val tvMeta: TextView = itemView.findViewById(R.id.tv_history_meta)
+        private val btnCopy: ImageButton = itemView.findViewById(R.id.btn_copy_history_item)
         private val btnDelete: ImageButton = itemView.findViewById(R.id.btn_delete_history_item)
 
         fun bind(row: ReplyHistoryRow) {
@@ -71,6 +73,7 @@ class ReplyHistoryAdapter(
                     val senderPart = ctx.getString(R.string.history_last_sender, senderDisplay)
                     tvMeta.text = "$senderPart • $timeStr"
 
+                    btnCopy.setOnClickListener { onCopyEntry(row) }
                     btnDelete.visibility = View.GONE
                     btnDelete.setOnClickListener(null)
                 }
@@ -100,6 +103,7 @@ class ReplyHistoryAdapter(
                     val senderPart = ctx.getString(R.string.history_sender_label, senderDisplay)
                     tvMeta.text = "$senderPart • $timeStr"
 
+                    btnCopy.setOnClickListener { onCopyEntry(row) }
                     btnDelete.visibility = View.VISIBLE
                     btnDelete.setOnClickListener { onDeleteEntry(item.id) }
                 }
