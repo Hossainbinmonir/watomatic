@@ -240,22 +240,183 @@ class ReplyExecutionManagerTest {
     }
 
     @Test
-    fun `SecurityException from PendingIntent returns FAILED`() {
-        val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
-            throw SecurityException("permission denied")
-        })
+    fun `deterministic pre-dispatch SecurityException from validator returns FAILED before calling PendingIntentSender`() {
+        val sendAttempts = AtomicInteger(0)
+        val manager = ReplyExecutionManager(
+            context = context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+                sendAttempts.incrementAndGet()
+            },
+            preDispatchValidator = ReplyExecutionManager.PreDispatchValidator { _, _, _ ->
+                throw SecurityException("missing permission before IPC")
+            }
+        )
         val wear = sampleWear()
-        val attempt = ReplyAttempt.create(replyText = "Reply", notificationKey = "k7")
+        val attempt = ReplyAttempt.create(replyText = "Reply", notificationKey = "k7-validator")
 
         val result = manager.executeReply(attempt, wear)
 
         assertEquals(ReplyExecutionStatus.FAILED, result.status)
-        assertTrue(result.dispatchAttempted)
+        assertFalse(result.dispatchAttempted)
+        assertFalse(result.dispatchedNormally)
+        assertFalse(result.isDispatched())
+        assertTrue(result.isFailedOrCancelled())
+        assertEquals(ReplyExecutionManager.FAILURE_SECURITY_EXCEPTION, result.failureCategory)
+        assertEquals(0, sendAttempts.get())
+        assertEquals(0, manager.activeInFlightCount())
+    }
+
+    @Test
+    fun `explicit PreDispatchSecurityException returns FAILED without marking dispatch attempted`() {
+        val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+            throw ReplyExecutionManager.PreDispatchSecurityException("rejected locally before send")
+        })
+        val wear = sampleWear()
+        val attempt = ReplyAttempt.create(replyText = "Reply", notificationKey = "k7-pre")
+
+        val result = manager.executeReply(attempt, wear)
+
+        assertEquals(ReplyExecutionStatus.FAILED, result.status)
+        assertFalse(result.dispatchAttempted)
         assertFalse(result.dispatchedNormally)
         assertFalse(result.isDispatched())
         assertTrue(result.isFailedOrCancelled())
         assertEquals(ReplyExecutionManager.FAILURE_SECURITY_EXCEPTION, result.failureCategory)
         assertEquals(0, manager.activeInFlightCount())
+    }
+
+    @Test
+    fun `ambiguous SecurityException from PendingIntentSender returns UNKNOWN and is not retried`() {
+        val sendAttempts = AtomicInteger(0)
+        val sensitiveReply = "SECRET_REPLY_SECURITY_CASE"
+        val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+            sendAttempts.incrementAndGet()
+            throw SecurityException("opaque binder SecurityException with $sensitiveReply")
+        })
+        val wear = sampleWear()
+        val attempt = ReplyAttempt.create(replyText = sensitiveReply, notificationKey = "k7-binder")
+
+        val result = manager.executeReply(attempt, wear)
+
+        assertEquals(ReplyExecutionStatus.UNKNOWN, result.status)
+        assertTrue(result.isUnknown())
+        assertTrue(result.dispatchAttempted)
+        assertFalse(result.dispatchedNormally)
+        assertFalse(result.isDispatched())
+        assertFalse(result.isFailedOrCancelled())
+        assertEquals(ReplyExecutionManager.FAILURE_AMBIGUOUS_SECURITY_EXCEPTION, result.failureCategory)
+        assertEquals("Ambiguous SecurityException must not be auto-retried", 1, sendAttempts.get())
+        assertFalse(result.diagnosticMessage.orEmpty().contains(sensitiveReply))
+        val logs = ShadowLog.getLogsForTag("ReplyExecutionManager").joinToString("\n") { it.msg.orEmpty() }
+        assertFalse(logs.contains(sensitiveReply))
+        assertEquals(0, manager.activeInFlightCount())
+    }
+
+    @Test
+    fun `transition listener throwing before dispatch does not abort execution or trigger duplicate send`() {
+        val sendAttempts = AtomicInteger(0)
+        val sensitiveReply = "TOP_SECRET_BEFORE_DISPATCH"
+        val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+            sendAttempts.incrementAndGet()
+        })
+        val seenStatuses = mutableListOf<ReplyExecutionStatus>()
+
+        val result = manager.executeReply(
+            ReplyAttempt.create(replyText = sensitiveReply, notificationKey = "k-listener-pre"),
+            sampleWear()
+        ) { attempt ->
+            seenStatuses.add(attempt.status)
+            if (attempt.status == ReplyExecutionStatus.GENERATED || attempt.status == ReplyExecutionStatus.DISPATCHING) {
+                throw IllegalStateException("listener boom for $sensitiveReply")
+            }
+        }
+
+        assertEquals(ReplyExecutionStatus.DISPATCHED, result.status)
+        assertTrue(result.isDispatched())
+        assertTrue(result.dispatchedNormally)
+        assertEquals(1, sendAttempts.get())
+        assertEquals(
+            listOf(ReplyExecutionStatus.GENERATED, ReplyExecutionStatus.DISPATCHING, ReplyExecutionStatus.DISPATCHED),
+            seenStatuses
+        )
+        val logs = ShadowLog.getLogsForTag("ReplyExecutionManager").joinToString("\n") { it.msg.orEmpty() }
+        assertFalse(logs.contains(sensitiveReply))
+        assertEquals(0, manager.activeInFlightCount())
+    }
+
+    @Test
+    fun `transition listener throwing after DISPATCHED never reclassifies result or triggers second dispatch`() {
+        val sendAttempts = AtomicInteger(0)
+        val sensitiveReply = "TOP_SECRET_AFTER_DISPATCH"
+        val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+            sendAttempts.incrementAndGet()
+        })
+
+        val result = manager.executeReply(
+            ReplyAttempt.create(replyText = sensitiveReply, notificationKey = "k-listener-post"),
+            sampleWear()
+        ) { attempt ->
+            if (attempt.status == ReplyExecutionStatus.DISPATCHED) {
+                throw RuntimeException("UI callback crash with $sensitiveReply")
+            }
+        }
+
+        assertEquals(ReplyExecutionStatus.DISPATCHED, result.status)
+        assertTrue(result.isDispatched())
+        assertTrue(result.dispatchAttempted)
+        assertTrue(result.dispatchedNormally)
+        assertNull(result.failureCategory)
+        assertEquals(1, sendAttempts.get())
+        val logs = ShadowLog.getLogsForTag("ReplyExecutionManager").joinToString("\n") { it.msg.orEmpty() }
+        assertFalse(logs.contains(sensitiveReply))
+        assertEquals(0, manager.activeInFlightCount())
+    }
+
+    @Test
+    fun `transition listener throwing on failure states preserves FAILED, CANCELLED, and UNKNOWN results`() {
+        val throwingListener = ReplyExecutionManager.StatusTransitionListener { attempt ->
+            if (attempt.status != ReplyExecutionStatus.GENERATED && attempt.status != ReplyExecutionStatus.DISPATCHING) {
+                throw IllegalArgumentException("broken observer on ${attempt.status} with ${attempt.replyText}")
+            }
+        }
+        val sensitiveReply = "SENSITIVE_FAILURE_TEXT"
+
+        // FAILED (missing PendingIntent)
+        val managerFailed = ReplyExecutionManager(context)
+        val failedResult = managerFailed.executeReply(
+            ReplyAttempt.create(replyText = sensitiveReply, notificationKey = "k-fail-listener"),
+            sampleWear(pendingIntent = null),
+            throwingListener
+        )
+        assertEquals(ReplyExecutionStatus.FAILED, failedResult.status)
+        assertEquals(ReplyExecutionManager.FAILURE_MISSING_PENDING_INTENT, failedResult.failureCategory)
+
+        // CANCELLED (PendingIntent.CanceledException)
+        val managerCancelled = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+            throw PendingIntent.CanceledException("expired")
+        })
+        val cancelledResult = managerCancelled.executeReply(
+            ReplyAttempt.create(replyText = sensitiveReply, notificationKey = "k-cancel-listener"),
+            sampleWear(),
+            throwingListener
+        )
+        assertEquals(ReplyExecutionStatus.CANCELLED, cancelledResult.status)
+        assertEquals(ReplyExecutionManager.FAILURE_PENDING_INTENT_CANCELED, cancelledResult.failureCategory)
+
+        // UNKNOWN (RuntimeException)
+        val managerUnknown = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+            throw IllegalStateException("ipc fail")
+        })
+        val unknownResult = managerUnknown.executeReply(
+            ReplyAttempt.create(replyText = sensitiveReply, notificationKey = "k-unknown-listener"),
+            sampleWear(),
+            throwingListener
+        )
+        assertEquals(ReplyExecutionStatus.UNKNOWN, unknownResult.status)
+        assertEquals(ReplyExecutionManager.FAILURE_AMBIGUOUS_SEND_EXCEPTION, unknownResult.failureCategory)
+
+        val logs = ShadowLog.getLogsForTag("ReplyExecutionManager").joinToString("\n") { it.msg.orEmpty() }
+        assertFalse(logs.contains(sensitiveReply))
     }
 
     @Test

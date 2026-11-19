@@ -18,7 +18,7 @@
         android:orientation="vertical"
         android:padding="16dp">
 
-        <!-- Header Row: App Name + Rule Badge + Count Pill -->
+        <!-- Header Row: App Name + Rule Badge + Status Badge + Count Pill -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -43,7 +43,7 @@
                 android:ellipsize="end"
                 android:fontFamily="@font/inter_medium"
                 android:maxLines="1"
-                android:maxWidth="160dp"
+                android:maxWidth="130dp"
                 android:paddingHorizontal="8dp"
                 android:paddingVertical="3dp"
                 android:textColor="@color/badge_gray_text"
@@ -56,9 +56,24 @@
                 android:layout_weight="1" />
 
             <TextView
+                android:id="@+id/tv_history_status_badge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/bg_badge_active"
+                android:fontFamily="@font/inter_bold"
+                android:maxLines="1"
+                android:paddingHorizontal="8dp"
+                android:paddingVertical="3dp"
+                android:textColor="@color/badge_active_text"
+                android:textSize="11sp"
+                tools:text="Dispatched" />
+
+            <TextView
                 android:id="@+id/tv_history_count_badge"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
                 android:background="@drawable/bg_badge_active"
                 android:fontFamily="@font/inter_bold"
                 android:paddingHorizontal="10dp"
@@ -88,7 +103,7 @@
             android:textSize="14sp"
             tools:text="Hi, how much is this item?" />
 
-        <!-- Reply Sent Box -->
+        <!-- Reply Box -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -99,10 +114,11 @@
             android:paddingVertical="10dp">
 
             <TextView
+                android:id="@+id/tv_history_reply_box_label"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:fontFamily="@font/inter_medium"
-                android:text="@string/history_reply_sent_label"
+                android:text="@string/history_reply_dispatched_label"
                 android:textColor="?attr/colorPrimary"
                 android:textSize="11sp" />
 
@@ -115,6 +131,18 @@
                 android:textColor="@color/text_primary"
                 android:textSize="13sp"
                 tools:text="Thanks for messaging! Our price starts at $10." />
+
+            <TextView
+                android:id="@+id/tv_history_status_note"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:fontFamily="@font/noto_sans"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp"
+                android:visibility="gone"
+                tools:text="Cancelled because the notification reply action expired."
+                tools:visibility="visible" />
         </LinearLayout>
 
         <!-- Footer: Sender, Time, Delete Action (Timeline) -->

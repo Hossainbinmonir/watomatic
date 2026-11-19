@@ -9,15 +9,22 @@ import com.parishod.watomatic.NotificationWear
 import com.parishod.watomatic.model.preferences.PreferencesManager
 import com.parishod.watomatic.model.rules.AutoReplyRule
 import com.parishod.watomatic.model.rules.AutoReplyRulesDatabase
+import com.parishod.watomatic.model.utils.DbUtils
 import com.parishod.watomatic.model.utils.NotificationUtils
+import com.parishod.watomatic.service.reply.NotificationEventKeyBuilder
+import com.parishod.watomatic.service.reply.PendingClaimHandoff
+import com.parishod.watomatic.service.reply.ReplyExecutionManager
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class RuleNotificationProcessor @JvmOverloads constructor(
     private val context: Context,
-    private val executor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+    private val executor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor(),
+    private val dbUtils: DbUtils = DbUtils(context.applicationContext)
 ) {
     interface ReplyDispatchCallback {
         fun onRuleMatchedSendReply(
@@ -30,13 +37,14 @@ class RuleNotificationProcessor @JvmOverloads constructor(
     }
 
     private val appContext = context.applicationContext
-    private val recentSignatures = ConcurrentHashMap<String, Long>()
+    private val shutDown = AtomicBoolean(false)
+    private val activePendingClaims = ConcurrentHashMap<String, String>()
 
     fun processNotification(
         sbn: StatusBarNotification?,
         callback: ReplyDispatchCallback
     ) {
-        if (sbn == null) return
+        if (sbn == null || shutDown.get()) return
 
         val prefs = PreferencesManager.getPreferencesInstance(appContext)
         if (!prefs.isServiceEnabled) return
@@ -63,9 +71,8 @@ class RuleNotificationProcessor @JvmOverloads constructor(
         }
 
         val extras = notification.extras
+        val messageText = NotificationEventKeyBuilder.extractIncomingMessage(sbn)
         val rawTextObj = extras?.get("android.text")
-        val messageText = extras?.getCharSequence(Notification.EXTRA_TEXT)?.toString()
-            ?: rawTextObj?.toString()
         val isGroup = extras?.getBoolean("android.isGroupConversation", false) ?: false
         val selfDisplayName = extras?.getString("android.selfDisplayName")
         val title = NotificationUtils.getTitle(sbn)
@@ -85,112 +92,166 @@ class RuleNotificationProcessor @JvmOverloads constructor(
             return
         }
 
-        val signature = buildSignature(sbn, title, messageText)
-        val now = System.currentTimeMillis()
-        cleanupExpiredSignatures(now)
-        val previousSeen = recentSignatures.putIfAbsent(signature, now)
-        if (previousSeen != null && (now - previousSeen) < DUPLICATE_WINDOW_MS) {
-            Log.d(TAG, "Duplicate notification suppressed for signature: $signature")
+        val eventKey = NotificationEventKeyBuilder.buildEventKey(sbn, messageText) ?: return
+        val senderKey = NotificationEventKeyBuilder.normalizeSenderKey(title)
+        val claimToken = UUID.randomUUID().toString()
+        val claimOutcome = try {
+            dbUtils.tryAcquireNotificationClaim(
+                eventKey,
+                claimToken,
+                packageName,
+                senderKey,
+                sbn.key,
+                System.currentTimeMillis(),
+                false
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed acquiring persistent claim (${e.javaClass.simpleName})")
             return
         }
-        recentSignatures[signature] = now
 
-        executor.execute {
-            try {
-                val db = AutoReplyRulesDatabase.getInstance(appContext)
-                val ruleDao = db.ruleDao()
-                val logDao = db.executionLogDao()
+        if (!claimOutcome.acquired) {
+            Log.d(TAG, "Duplicate or locked notification suppressed: decision=${claimOutcome.decision}")
+            return
+        }
 
-                val totalRules = ruleDao.getTotalRuleCountSync()
-                if (totalRules == 0) {
-                    callback.onFallbackToLegacy(sbn)
+        if (shutDown.get()) {
+            cancelClaimSafely(eventKey, claimToken)
+            return
+        }
+
+        activePendingClaims[claimToken] = eventKey
+        PendingClaimHandoff.register(eventKey, claimToken)
+
+        try {
+            executor.execute {
+                if (shutDown.get()) {
+                    activePendingClaims.remove(claimToken)
+                    PendingClaimHandoff.consume(eventKey)
+                    cancelClaimSafely(eventKey, claimToken)
                     return@execute
                 }
+                try {
+                    val db = AutoReplyRulesDatabase.getInstance(appContext)
+                    val ruleDao = db.ruleDao()
+                    val logDao = db.executionLogDao()
 
-                val enabledRules = ruleDao.getEnabledRulesSync()
-                if (enabledRules.isEmpty()) {
-                    if (prefs.isRuleFallbackToGlobalEnabled()) {
+                    val totalRules = ruleDao.getTotalRuleCountSync()
+                    if (totalRules == 0) {
+                        activePendingClaims.remove(claimToken)
                         callback.onFallbackToLegacy(sbn)
+                        return@execute
                     }
-                    return@execute
-                }
 
-                val logStore = RoomRuleExecutionLogStore(logDao)
-                val evaluator = RuleEvaluator(logStore)
-                val msgContext = IncomingMessageContext(
-                    packageName = packageName,
-                    senderName = title,
-                    messageText = messageText,
-                    isGroup = isGroup,
-                    notificationKey = sbn.key ?: "",
-                    messageTimestamp = notification.`when`,
-                    selfDisplayName = selfDisplayName
-                )
-
-                val result = evaluator.evaluate(enabledRules, msgContext, System.currentTimeMillis())
-                if (result == null) {
-                    if (prefs.isRuleFallbackToGlobalEnabled()) {
-                        callback.onFallbackToLegacy(sbn)
+                    val enabledRules = ruleDao.getEnabledRulesSync()
+                    if (enabledRules.isEmpty()) {
+                        activePendingClaims.remove(claimToken)
+                        if (prefs.isRuleFallbackToGlobalEnabled()) {
+                            callback.onFallbackToLegacy(sbn)
+                        } else {
+                            PendingClaimHandoff.consume(eventKey)
+                            releaseClaimSafely(eventKey, claimToken)
+                        }
+                        return@execute
                     }
-                    return@execute
-                }
 
-                val finalReplyText = result.replyText
-                val delaySeconds = result.rule.replyDelaySeconds.coerceIn(0, MAX_DELAY_SECONDS)
+                    val logStore = RoomRuleExecutionLogStore(logDao)
+                    val evaluator = RuleEvaluator(logStore)
+                    val msgContext = IncomingMessageContext(
+                        packageName = packageName,
+                        senderName = title,
+                        messageText = messageText,
+                        isGroup = isGroup,
+                        notificationKey = sbn.key ?: "",
+                        messageTimestamp = notification.`when`,
+                        selfDisplayName = selfDisplayName
+                    )
 
-                val dispatchAction = Runnable {
-                    try {
-                        val senderKey = title?.trim().orEmpty().ifEmpty { RuleEvaluator.UNKNOWN_SENDER }
-                        logStore.recordExecution(
-                            ruleId = result.rule.id,
-                            packageName = packageName,
-                            senderName = senderKey,
-                            notificationKey = sbn.key ?: "",
-                            messageTimestamp = notification.`when`,
-                            repliedAt = System.currentTimeMillis()
-                        )
-                        callback.onRuleMatchedSendReply(sbn, notificationWear, finalReplyText, result.rule)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error dispatching rule reply", e)
+                    val result = evaluator.evaluate(enabledRules, msgContext, System.currentTimeMillis())
+                    if (result == null) {
+                        activePendingClaims.remove(claimToken)
+                        if (prefs.isRuleFallbackToGlobalEnabled()) {
+                            callback.onFallbackToLegacy(sbn)
+                        } else {
+                            PendingClaimHandoff.consume(eventKey)
+                            releaseClaimSafely(eventKey, claimToken)
+                        }
+                        return@execute
                     }
-                }
 
-                if (delaySeconds > 0) {
-                    executor.schedule(dispatchAction, delaySeconds.toLong(), TimeUnit.SECONDS)
-                } else {
-                    dispatchAction.run()
+                    val finalReplyText = result.replyText
+                    val delaySeconds = result.rule.replyDelaySeconds.coerceIn(0, MAX_DELAY_SECONDS)
+
+                    val dispatchAction = Runnable {
+                        activePendingClaims.remove(claimToken)
+                        if (shutDown.get()) {
+                            PendingClaimHandoff.consume(eventKey)
+                            cancelClaimSafely(eventKey, claimToken)
+                            return@Runnable
+                        }
+                        try {
+                            callback.onRuleMatchedSendReply(sbn, notificationWear, finalReplyText, result.rule)
+                        } catch (e: Exception) {
+                            PendingClaimHandoff.consume(eventKey)
+                            cancelClaimSafely(eventKey, claimToken)
+                            Log.e(TAG, "Error dispatching rule reply (${e.javaClass.simpleName})")
+                        }
+                    }
+
+                    if (delaySeconds > 0) {
+                        executor.schedule(dispatchAction, delaySeconds.toLong(), TimeUnit.SECONDS)
+                    } else {
+                        dispatchAction.run()
+                    }
+                } catch (e: Exception) {
+                    activePendingClaims.remove(claimToken)
+                    PendingClaimHandoff.consume(eventKey)
+                    releaseClaimSafely(eventKey, claimToken)
+                    Log.e(TAG, "Error evaluating auto-reply rules (${e.javaClass.simpleName})")
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error evaluating auto-reply rules", e)
             }
+        } catch (e: Exception) {
+            activePendingClaims.remove(claimToken)
+            PendingClaimHandoff.consume(eventKey)
+            cancelClaimSafely(eventKey, claimToken)
+            Log.e(TAG, "Failed scheduling rule evaluation (${e.javaClass.simpleName})")
         }
     }
 
-    private fun buildSignature(
-        sbn: StatusBarNotification,
-        title: String?,
-        messageText: String?
-    ): String {
-        val key = sbn.key ?: sbn.packageName
-        val whenTime = sbn.notification?.`when` ?: 0L
-        return "$key|$whenTime|${title.orEmpty()}|${messageText.orEmpty()}"
+    private fun releaseClaimSafely(eventKey: String, claimToken: String) {
+        try {
+            dbUtils.releaseUnusedNotificationClaim(eventKey, claimToken)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed releasing unused claim (${e.javaClass.simpleName})")
+        }
     }
 
-    private fun cleanupExpiredSignatures(now: Long) {
-        if (recentSignatures.size > MAX_SIGNATURE_CACHE_SIZE) {
-            recentSignatures.entries.removeIf { (_, ts) -> (now - ts) > DUPLICATE_WINDOW_MS }
+    private fun cancelClaimSafely(eventKey: String, claimToken: String) {
+        try {
+            dbUtils.cancelPendingNotificationClaim(
+                eventKey,
+                claimToken,
+                ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN,
+                System.currentTimeMillis()
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed cancelling pending claim (${e.javaClass.simpleName})")
         }
     }
 
     fun shutdown() {
+        shutDown.set(true)
         executor.shutdownNow()
-        recentSignatures.clear()
+        val snapshot = activePendingClaims.entries.toList()
+        activePendingClaims.clear()
+        for ((token, eventKey) in snapshot) {
+            PendingClaimHandoff.consume(eventKey)
+            cancelClaimSafely(eventKey, token)
+        }
     }
 
     companion object {
         private const val TAG = "RuleNotificationProc"
-        private const val DUPLICATE_WINDOW_MS = 15_000L
-        private const val MAX_SIGNATURE_CACHE_SIZE = 200
         private const val MAX_DELAY_SECONDS = 300
     }
 }

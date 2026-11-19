@@ -215,6 +215,70 @@
                 tools:visibility="visible" />
         </LinearLayout>
 
+        <!-- Status Filter Chips (Timeline Mode) -->
+        <HorizontalScrollView
+            android:id="@+id/status_filter_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginTop="2dp"
+            android:scrollbars="none"
+            android:visibility="gone"
+            tools:visibility="visible">
+
+            <com.google.android.material.chip.ChipGroup
+                android:id="@+id/chip_group_history_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                app:selectionRequired="true"
+                app:singleLine="true"
+                app:singleSelection="true">
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chip_status_all"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:text="@string/history_filter_all" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chip_status_dispatched"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/history_filter_dispatched" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chip_status_failed"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/history_filter_failed" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chip_status_cancelled"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/history_filter_cancelled" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chip_status_unknown"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/history_filter_unknown" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chip_status_legacy"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/history_filter_legacy" />
+            </com.google.android.material.chip.ChipGroup>
+        </HorizontalScrollView>
+
         <!-- List + Empty State -->
         <FrameLayout
             android:layout_width="match_parent"

@@ -17,7 +17,8 @@ import androidx.room.PrimaryKey;
                 onDelete = ForeignKey.CASCADE
         )},
         indices = {
-                @Index(value = "index")
+                @Index(value = "index"),
+                @Index(value = "attempt_id")
         })
 public class MessageLog {
     @PrimaryKey(autoGenerate = true)
@@ -43,6 +44,12 @@ public class MessageLog {
     private String matchedRuleName;
     @ColumnInfo(name = "notif_reply_time")
     private long notifReplyTime;
+    @NonNull
+    @ColumnInfo(name = "execution_status", defaultValue = "LEGACY")
+    private String executionStatus = ReplyHistoryStatus.LEGACY;
+    @Nullable
+    @ColumnInfo(name = "attempt_id")
+    private String attemptId;
 
     public MessageLog(int index,
                       String notifTitle,
@@ -57,6 +64,8 @@ public class MessageLog {
         this.notifRepliedMsg = notifRepliedMsg;
         this.notifReplyTime = notifReplyTime;
         this.notifIsReplied = true;
+        this.executionStatus = ReplyHistoryStatus.LEGACY;
+        this.attemptId = null;
     }
 
     @Ignore
@@ -71,6 +80,22 @@ public class MessageLog {
         this(index, notifTitle, notifArrivedTime, notifRepliedMsg, notifReplyTime);
         this.notifIncomingMsg = notifIncomingMsg;
         this.matchedRuleName = matchedRuleName;
+    }
+
+    @Ignore
+    public MessageLog(int index,
+                      String notifTitle,
+                      @Nullable String notifIncomingMsg,
+                      long notifArrivedTime,
+                      String notifRepliedMsg,
+                      @Nullable String matchedRuleName,
+                      long notifReplyTime,
+                      @NonNull String executionStatus,
+                      @Nullable String attemptId
+    ) {
+        this(index, notifTitle, notifIncomingMsg, notifArrivedTime, notifRepliedMsg, matchedRuleName, notifReplyTime);
+        this.executionStatus = executionStatus;
+        this.attemptId = attemptId;
     }
 
     public int getId() {
@@ -153,5 +178,23 @@ public class MessageLog {
 
     public void setNotifReplyTime(long notifReplyTime) {
         this.notifReplyTime = notifReplyTime;
+    }
+
+    @NonNull
+    public String getExecutionStatus() {
+        return executionStatus;
+    }
+
+    public void setExecutionStatus(@NonNull String executionStatus) {
+        this.executionStatus = executionStatus;
+    }
+
+    @Nullable
+    public String getAttemptId() {
+        return attemptId;
+    }
+
+    public void setAttemptId(@Nullable String attemptId) {
+        this.attemptId = attemptId;
     }
 }

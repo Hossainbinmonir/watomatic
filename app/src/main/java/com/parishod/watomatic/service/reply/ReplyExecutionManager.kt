@@ -20,16 +20,31 @@ import java.util.concurrent.atomic.AtomicBoolean
 class ReplyExecutionManager @JvmOverloads constructor(
     context: Context,
     private val pendingIntentSender: PendingIntentSender = DefaultPendingIntentSender(),
-    private val clock: () -> Long = { System.currentTimeMillis() }
+    private val clock: () -> Long = { System.currentTimeMillis() },
+    private val preDispatchValidator: PreDispatchValidator? = null
 ) {
     fun interface PendingIntentSender {
         @Throws(PendingIntent.CanceledException::class)
         fun send(context: Context, pendingIntent: PendingIntent, fillInIntent: Intent)
     }
 
+    fun interface PreDispatchValidator {
+        @Throws(SecurityException::class)
+        fun validate(context: Context, pendingIntent: PendingIntent, fillInIntent: Intent)
+    }
+
     fun interface StatusTransitionListener {
         fun onTransition(attempt: ReplyAttempt)
     }
+
+    /**
+     * Explicit [SecurityException] indicating a security check failed deterministically
+     * BEFORE Android `PendingIntent.send()` was invoked.
+     */
+    class PreDispatchSecurityException @JvmOverloads constructor(
+        message: String,
+        cause: Throwable? = null
+    ) : SecurityException(message, cause)
 
     private class DefaultPendingIntentSender : PendingIntentSender {
         override fun send(context: Context, pendingIntent: PendingIntent, fillInIntent: Intent) {
@@ -166,62 +181,110 @@ class ReplyExecutionManager @JvmOverloads constructor(
             }
             RemoteInput.addResultsToIntent(arrayOf(freeFormRemoteInput), localIntent, localBundle)
 
+            if (preDispatchValidator != null) {
+                try {
+                    preDispatchValidator.validate(appContext, pendingIntent, localIntent)
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "Pre-dispatch security check failed (${e.javaClass.simpleName})")
+                    currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.FAILED, clock())
+                    notifyTransition(transitionListener, currentAttempt)
+                    return ReplyExecutionResult(
+                        executionId = currentAttempt.attemptId,
+                        status = ReplyExecutionStatus.FAILED,
+                        dispatchAttempted = false,
+                        dispatchedNormally = false,
+                        failureCategory = FAILURE_SECURITY_EXCEPTION,
+                        diagnosticMessage = "Pre-dispatch security check failed (${e.javaClass.simpleName})",
+                        timestampMs = currentAttempt.updatedAtMs
+                    )
+                }
+            }
+
             currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.DISPATCHING, clock())
             notifyTransition(transitionListener, currentAttempt)
 
-            return try {
+            // Isolate PendingIntent dispatch from transition listener callbacks so listener
+            // exceptions can never corrupt or reclassify the authoritative dispatch outcome.
+            val dispatchError: Exception? = try {
                 pendingIntentSender.send(appContext, pendingIntent, localIntent)
-                currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.DISPATCHED, clock())
-                notifyTransition(transitionListener, currentAttempt)
-                ReplyExecutionResult(
-                    executionId = currentAttempt.attemptId,
-                    status = ReplyExecutionStatus.DISPATCHED,
-                    dispatchAttempted = true,
-                    dispatchedNormally = true,
-                    failureCategory = null,
-                    diagnosticMessage = "PendingIntent dispatch accepted",
-                    timestampMs = currentAttempt.updatedAtMs
-                )
-            } catch (e: PendingIntent.CanceledException) {
-                Log.e(TAG, "PendingIntent dispatch cancelled (${e.javaClass.simpleName})")
-                currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.CANCELLED, clock())
-                notifyTransition(transitionListener, currentAttempt)
-                ReplyExecutionResult(
-                    executionId = currentAttempt.attemptId,
-                    status = ReplyExecutionStatus.CANCELLED,
-                    dispatchAttempted = true,
-                    dispatchedNormally = false,
-                    failureCategory = FAILURE_PENDING_INTENT_CANCELED,
-                    diagnosticMessage = "PendingIntent cancelled (${e.javaClass.simpleName})",
-                    timestampMs = currentAttempt.updatedAtMs
-                )
-            } catch (e: SecurityException) {
-                Log.e(TAG, "PendingIntent dispatch rejected (${e.javaClass.simpleName})")
-                currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.FAILED, clock())
-                notifyTransition(transitionListener, currentAttempt)
-                ReplyExecutionResult(
-                    executionId = currentAttempt.attemptId,
-                    status = ReplyExecutionStatus.FAILED,
-                    dispatchAttempted = true,
-                    dispatchedNormally = false,
-                    failureCategory = FAILURE_SECURITY_EXCEPTION,
-                    diagnosticMessage = "Dispatch failed due to security policy (${e.javaClass.simpleName})",
-                    timestampMs = currentAttempt.updatedAtMs
-                )
+                null
             } catch (e: Exception) {
-                // Outcome after calling PendingIntent.send() cannot be known reliably; do not retry or claim success.
-                Log.e(TAG, "PendingIntent dispatch outcome ambiguous (${e.javaClass.simpleName})")
-                currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.UNKNOWN, clock())
-                notifyTransition(transitionListener, currentAttempt)
-                ReplyExecutionResult(
-                    executionId = currentAttempt.attemptId,
-                    status = ReplyExecutionStatus.UNKNOWN,
-                    dispatchAttempted = true,
-                    dispatchedNormally = false,
-                    failureCategory = FAILURE_AMBIGUOUS_SEND_EXCEPTION,
-                    diagnosticMessage = "Ambiguous dispatch outcome (${e.javaClass.simpleName})",
-                    timestampMs = currentAttempt.updatedAtMs
-                )
+                e
+            }
+
+            return when (dispatchError) {
+                null -> {
+                    currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.DISPATCHED, clock())
+                    notifyTransition(transitionListener, currentAttempt)
+                    ReplyExecutionResult(
+                        executionId = currentAttempt.attemptId,
+                        status = ReplyExecutionStatus.DISPATCHED,
+                        dispatchAttempted = true,
+                        dispatchedNormally = true,
+                        failureCategory = null,
+                        diagnosticMessage = "PendingIntent dispatch accepted",
+                        timestampMs = currentAttempt.updatedAtMs
+                    )
+                }
+                is PendingIntent.CanceledException -> {
+                    Log.e(TAG, "PendingIntent dispatch cancelled (${dispatchError.javaClass.simpleName})")
+                    currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.CANCELLED, clock())
+                    notifyTransition(transitionListener, currentAttempt)
+                    ReplyExecutionResult(
+                        executionId = currentAttempt.attemptId,
+                        status = ReplyExecutionStatus.CANCELLED,
+                        dispatchAttempted = true,
+                        dispatchedNormally = false,
+                        failureCategory = FAILURE_PENDING_INTENT_CANCELED,
+                        diagnosticMessage = "PendingIntent cancelled (${dispatchError.javaClass.simpleName})",
+                        timestampMs = currentAttempt.updatedAtMs
+                    )
+                }
+                is PreDispatchSecurityException -> {
+                    Log.e(TAG, "PendingIntent dispatch rejected before send (${dispatchError.javaClass.simpleName})")
+                    currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.FAILED, clock())
+                    notifyTransition(transitionListener, currentAttempt)
+                    ReplyExecutionResult(
+                        executionId = currentAttempt.attemptId,
+                        status = ReplyExecutionStatus.FAILED,
+                        dispatchAttempted = false,
+                        dispatchedNormally = false,
+                        failureCategory = FAILURE_SECURITY_EXCEPTION,
+                        diagnosticMessage = "Dispatch rejected before send (${dispatchError.javaClass.simpleName})",
+                        timestampMs = currentAttempt.updatedAtMs
+                    )
+                }
+                is SecurityException -> {
+                    // PendingIntent.send() crosses an opaque Binder IPC boundary; a generic
+                    // SecurityException does not prove dispatch never happened.
+                    Log.e(TAG, "PendingIntent dispatch security outcome ambiguous (${dispatchError.javaClass.simpleName})")
+                    currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.UNKNOWN, clock())
+                    notifyTransition(transitionListener, currentAttempt)
+                    ReplyExecutionResult(
+                        executionId = currentAttempt.attemptId,
+                        status = ReplyExecutionStatus.UNKNOWN,
+                        dispatchAttempted = true,
+                        dispatchedNormally = false,
+                        failureCategory = FAILURE_AMBIGUOUS_SECURITY_EXCEPTION,
+                        diagnosticMessage = "Ambiguous security outcome (${dispatchError.javaClass.simpleName})",
+                        timestampMs = currentAttempt.updatedAtMs
+                    )
+                }
+                else -> {
+                    // Outcome after calling PendingIntent.send() cannot be known reliably; do not retry or claim success.
+                    Log.e(TAG, "PendingIntent dispatch outcome ambiguous (${dispatchError.javaClass.simpleName})")
+                    currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.UNKNOWN, clock())
+                    notifyTransition(transitionListener, currentAttempt)
+                    ReplyExecutionResult(
+                        executionId = currentAttempt.attemptId,
+                        status = ReplyExecutionStatus.UNKNOWN,
+                        dispatchAttempted = true,
+                        dispatchedNormally = false,
+                        failureCategory = FAILURE_AMBIGUOUS_SEND_EXCEPTION,
+                        diagnosticMessage = "Ambiguous dispatch outcome (${dispatchError.javaClass.simpleName})",
+                        timestampMs = currentAttempt.updatedAtMs
+                    )
+                }
             }
         } finally {
             inFlightKeys.remove(lockKey, currentAttempt.attemptId)
@@ -255,7 +318,12 @@ class ReplyExecutionManager @JvmOverloads constructor(
         listener: StatusTransitionListener?,
         attempt: ReplyAttempt
     ) {
-        listener?.onTransition(attempt)
+        if (listener == null) return
+        try {
+            listener.onTransition(attempt)
+        } catch (e: Exception) {
+            Log.w(TAG, "Transition listener failed (${e.javaClass.simpleName}) at status=${attempt.status}")
+        }
     }
 
     companion object {
@@ -268,6 +336,12 @@ class ReplyExecutionManager @JvmOverloads constructor(
         const val FAILURE_CONCURRENT_IN_FLIGHT = "CONCURRENT_IN_FLIGHT"
         const val FAILURE_PENDING_INTENT_CANCELED = "PENDING_INTENT_CANCELED"
         const val FAILURE_SECURITY_EXCEPTION = "SECURITY_EXCEPTION"
+        const val FAILURE_AMBIGUOUS_SECURITY_EXCEPTION = "AMBIGUOUS_SECURITY_EXCEPTION"
         const val FAILURE_AMBIGUOUS_SEND_EXCEPTION = "AMBIGUOUS_SEND_EXCEPTION"
+        const val FAILURE_DUPLICATE_EVENT = "DUPLICATE_EVENT"
+        const val FAILURE_UNKNOWN_OUTCOME_LOCKED = "UNKNOWN_OUTCOME_LOCKED"
+        const val FAILURE_GENERATED_INTERRUPTED = "GENERATED_INTERRUPTED"
+        const val FAILURE_DISPATCHING_INTERRUPTED = "DISPATCHING_INTERRUPTED"
+        const val FAILURE_CLAIM_PERSISTENCE_ERROR = "CLAIM_PERSISTENCE_ERROR"
     }
 }

@@ -20,8 +20,8 @@ enum class ReplyExecutionStatus {
     DISPATCHED,
 
     /**
-     * A deterministic failure occurred before successful dispatch (for example, missing
-     * `RemoteInput`, missing `PendingIntent`, or a `SecurityException`).
+     * A deterministic failure occurred before dispatch (for example, missing
+     * `RemoteInput`, missing `PendingIntent`, or a deterministic pre-dispatch `SecurityException`).
      */
     FAILED,
 

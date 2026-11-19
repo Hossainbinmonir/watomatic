@@ -8,7 +8,8 @@ import androidx.room.PrimaryKey
 @Entity(
     tableName = "ai_reply_logs",
     indices = [
-        Index(value = ["package_name", "sender_key", "replied_at"])
+        Index(value = ["package_name", "sender_key", "replied_at"]),
+        Index(value = ["attempt_id"], unique = true)
     ]
 )
 data class AiReplyLog(
@@ -22,5 +23,22 @@ data class AiReplyLog(
     val senderKey: String,
 
     @ColumnInfo(name = "replied_at")
-    val repliedAt: Long = System.currentTimeMillis()
-)
+    val repliedAt: Long = System.currentTimeMillis(),
+
+    @ColumnInfo(name = "attempt_id")
+    val attemptId: String? = null
+) {
+    @androidx.room.Ignore
+    constructor(
+        id: Long,
+        packageName: String,
+        senderKey: String,
+        repliedAt: Long
+    ) : this(
+        id = id,
+        packageName = packageName,
+        senderKey = senderKey,
+        repliedAt = repliedAt,
+        attemptId = null
+    )
+}

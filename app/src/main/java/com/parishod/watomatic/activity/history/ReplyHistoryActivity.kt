@@ -62,6 +62,9 @@ class ReplyHistoryActivity : BaseActivity() {
             },
             onDeleteEntry = { logId ->
                 viewModel.deleteEntry(logId)
+            },
+            onDeleteTimelineEntry = { item ->
+                viewModel.deleteTimelineEntry(item)
             }
         )
         binding.historyRecyclerView.layoutManager = LinearLayoutManager(this)
@@ -85,6 +88,19 @@ class ReplyHistoryActivity : BaseActivity() {
                 HistoryViewMode.GROUPED
             }
             viewModel.setViewMode(mode)
+        }
+
+        binding.chipGroupHistoryStatus.setOnCheckedStateChangeListener { _, checkedIds ->
+            val selectedId = checkedIds.firstOrNull() ?: R.id.chip_status_all
+            val filter = when (selectedId) {
+                R.id.chip_status_dispatched -> HistoryStatusFilter.DISPATCHED
+                R.id.chip_status_failed -> HistoryStatusFilter.FAILED
+                R.id.chip_status_cancelled -> HistoryStatusFilter.CANCELLED
+                R.id.chip_status_unknown -> HistoryStatusFilter.UNKNOWN
+                R.id.chip_status_legacy -> HistoryStatusFilter.LEGACY
+                else -> HistoryStatusFilter.ALL
+            }
+            viewModel.setStatusFilter(filter)
         }
 
         binding.btnClearHistory.setOnClickListener {
@@ -113,10 +129,13 @@ class ReplyHistoryActivity : BaseActivity() {
                     latestUiState = state
                     binding.tvTotalRepliesCount.text = state.totalReplies.toString()
                     binding.tvUniqueMessagesCount.text = state.uniqueMessages.toString()
+                    val hasAnyHistory = state.totalReplies > 0 || state.totalAttempts > 0
                     binding.btnClearHistory.visibility =
-                        if (state.totalReplies > 0) View.VISIBLE else View.GONE
+                        if (hasAnyHistory) View.VISIBLE else View.GONE
                     binding.btnCopyHistoryReport.visibility =
                         if (state.displayedRows.isNotEmpty()) View.VISIBLE else View.GONE
+                    binding.statusFilterScroll.visibility =
+                        if (state.mode == HistoryViewMode.TIMELINE) View.VISIBLE else View.GONE
 
                     adapter.submitList(state.displayedRows)
 
@@ -124,9 +143,12 @@ class ReplyHistoryActivity : BaseActivity() {
                     binding.emptyHistoryContainer.visibility = if (showEmpty) View.VISIBLE else View.GONE
                     binding.historyRecyclerView.visibility = if (showEmpty) View.GONE else View.VISIBLE
 
-                    if (state.totalReplies == 0) {
+                    if (!hasAnyHistory) {
                         binding.tvEmptyHistoryTitle.setText(R.string.empty_history_title)
                         binding.tvEmptyHistorySubtitle.setText(R.string.empty_history_subtitle)
+                    } else if (state.mode == HistoryViewMode.GROUPED && state.totalReplies == 0 && state.totalAttempts > 0) {
+                        binding.tvEmptyHistoryTitle.setText(R.string.empty_history_title)
+                        binding.tvEmptyHistorySubtitle.setText(R.string.history_grouped_only_attempts_subtitle)
                     } else {
                         binding.tvEmptyHistoryTitle.setText(R.string.empty_filtered_history)
                         binding.tvEmptyHistorySubtitle.text = ""

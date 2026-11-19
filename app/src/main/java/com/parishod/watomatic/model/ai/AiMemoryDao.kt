@@ -4,6 +4,8 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
+import com.parishod.watomatic.service.ai.AiPromptAndPolicyHelper
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -17,7 +19,10 @@ interface AiMemoryDao {
     @Query("SELECT COUNT(*) FROM ai_notes WHERE is_completed = 0")
     fun observePendingNotesCount(): Flow<Int>
 
-    @Query("SELECT COUNT(*) FROM ai_conversation_messages")
+    @Query(
+        "SELECT COUNT(*) FROM ai_conversation_messages " +
+            "WHERE role = 'user' OR execution_status IN ('DISPATCHED', 'LEGACY')"
+    )
     fun observeConversationMessageCount(): Flow<Int>
 
     // ---- Suspend Operations for ViewModels ----
@@ -45,6 +50,7 @@ interface AiMemoryDao {
     @Query(
         "SELECT * FROM ai_conversation_messages " +
             "WHERE package_name = :packageName AND sender_key = :senderKey " +
+            "AND (role = 'user' OR execution_status IN ('DISPATCHED', 'LEGACY')) " +
             "ORDER BY timestamp DESC, id DESC LIMIT :limit"
     )
     fun getRecentMessagesDescSync(
@@ -53,8 +59,29 @@ interface AiMemoryDao {
         limit: Int
     ): List<AiConversationMessage>
 
+    @Query("SELECT * FROM ai_conversation_messages ORDER BY timestamp ASC, id ASC")
+    fun getAllConversationMessagesSync(): List<AiConversationMessage>
+
+    @Query("SELECT * FROM ai_conversation_messages WHERE attempt_id = :attemptId AND role = 'assistant'")
+    fun getAssistantMessagesByAttemptIdSync(attemptId: String): List<AiConversationMessage>
+
+    @Query("SELECT COUNT(*) FROM ai_conversation_messages WHERE attempt_id = :attemptId AND role = 'assistant'")
+    fun countAssistantMessagesByAttemptIdSync(attemptId: String): Int
+
+    @Query("SELECT COUNT(*) FROM ai_conversation_messages WHERE incoming_event_key = :incomingEventKey")
+    fun countMessagesByIncomingEventKeySync(incomingEventKey: String): Int
+
+    @Query(
+        "SELECT MAX(timestamp) FROM ai_conversation_messages " +
+            "WHERE package_name = :packageName AND sender_key = :senderKey"
+    )
+    fun getMaxMessageTimestampSync(packageName: String, senderKey: String): Long?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun insertConversationMessageSync(message: AiConversationMessage): Long
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    fun insertConversationMessageIgnoreSync(message: AiConversationMessage): Long
 
     @Query(
         "DELETE FROM ai_conversation_messages " +
@@ -62,6 +89,7 @@ interface AiMemoryDao {
             "AND id NOT IN (" +
             "  SELECT id FROM ai_conversation_messages " +
             "  WHERE package_name = :packageName AND sender_key = :senderKey " +
+            "  AND (role = 'user' OR execution_status IN ('DISPATCHED', 'LEGACY')) " +
             "  ORDER BY timestamp DESC, id DESC LIMIT :keepCount" +
             ")"
     )
@@ -71,7 +99,10 @@ interface AiMemoryDao {
         keepCount: Int
     )
 
-    @Query("SELECT COUNT(*) FROM ai_conversation_messages")
+    @Query(
+        "SELECT COUNT(*) FROM ai_conversation_messages " +
+            "WHERE role = 'user' OR execution_status IN ('DISPATCHED', 'LEGACY')"
+    )
     fun getConversationMessageCountSync(): Int
 
     @Query("SELECT COUNT(*) FROM ai_notes WHERE is_completed = 0")
@@ -79,6 +110,12 @@ interface AiMemoryDao {
 
     @Query("SELECT COUNT(*) FROM ai_notes")
     fun getTotalNoteCountSync(): Int
+
+    @Query("SELECT * FROM ai_notes WHERE attempt_id = :attemptId ORDER BY created_at ASC, id ASC")
+    fun getNotesByAttemptIdSync(attemptId: String): List<AiNote>
+
+    @Query("SELECT COUNT(*) FROM ai_notes WHERE attempt_id = :attemptId")
+    fun countNotesByAttemptIdSync(attemptId: String): Int
 
     @Query(
         "SELECT * FROM ai_notes " +
@@ -95,8 +132,20 @@ interface AiMemoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun insertNoteSync(note: AiNote): Long
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    fun insertNoteIgnoreSync(note: AiNote): Long
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun insertReplyLogSync(log: AiReplyLog): Long
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    fun insertReplyLogIgnoreSync(log: AiReplyLog): Long
+
+    @Query("SELECT COUNT(*) FROM ai_reply_logs WHERE attempt_id = :attemptId")
+    fun countReplyLogsByAttemptIdSync(attemptId: String): Int
+
+    @Query("SELECT * FROM ai_reply_logs WHERE attempt_id = :attemptId")
+    fun getReplyLogsByAttemptIdSync(attemptId: String): List<AiReplyLog>
 
     @Query(
         "SELECT MAX(replied_at) FROM ai_reply_logs " +
@@ -116,4 +165,149 @@ interface AiMemoryDao {
         senderKey: String,
         sinceTime: Long
     ): Int
+
+    @Transaction
+    fun recordIncomingUserMessageSync(
+        packageName: String,
+        senderKey: String,
+        senderDisplay: String,
+        incomingMessage: String,
+        incomingEventKey: String?,
+        timestampMs: Long,
+        keepCount: Int
+    ): Boolean {
+        val cleanIncoming = incomingMessage.trim()
+        if (cleanIncoming.isEmpty()) return false
+        if (!incomingEventKey.isNullOrBlank() && countMessagesByIncomingEventKeySync(incomingEventKey) > 0) {
+            return false
+        }
+        val rowId = insertConversationMessageIgnoreSync(
+            AiConversationMessage(
+                packageName = packageName,
+                senderKey = senderKey,
+                senderDisplayName = senderDisplay,
+                role = "user",
+                content = cleanIncoming,
+                timestamp = timestampMs,
+                attemptId = null,
+                incomingEventKey = incomingEventKey?.takeIf { it.isNotBlank() },
+                executionStatus = AiConversationMessage.STATUS_USER_RECEIVED
+            )
+        )
+        if (rowId > 0L && keepCount > 0) {
+            trimConversationMessagesSync(packageName, senderKey, keepCount)
+        }
+        return rowId > 0L
+    }
+
+    @Transaction
+    fun persistConfirmedAiReplySync(
+        attemptId: String,
+        packageName: String,
+        senderKey: String,
+        senderDisplay: String,
+        incomingMessage: String,
+        incomingEventKey: String?,
+        assistantReply: String,
+        sanitizedNotes: List<String>,
+        memoryEnabled: Boolean,
+        notesEnabled: Boolean,
+        keepCount: Int,
+        timestampMs: Long
+    ): Boolean {
+        if (attemptId.isBlank()) return false
+
+        var insertedAny = false
+
+        if (countReplyLogsByAttemptIdSync(attemptId) == 0) {
+            val logRowId = insertReplyLogIgnoreSync(
+                AiReplyLog(
+                    packageName = packageName,
+                    senderKey = senderKey,
+                    repliedAt = timestampMs,
+                    attemptId = attemptId
+                )
+            )
+            if (logRowId > 0L) insertedAny = true
+        }
+
+        val alreadyHasAssistant = countAssistantMessagesByAttemptIdSync(attemptId) > 0
+
+        if (memoryEnabled) {
+            val cleanIncoming = incomingMessage.trim()
+            if (cleanIncoming.isNotEmpty()) {
+                val shouldInsertIncoming = if (!incomingEventKey.isNullOrBlank()) {
+                    countMessagesByIncomingEventKeySync(incomingEventKey) == 0
+                } else {
+                    !alreadyHasAssistant
+                }
+                if (shouldInsertIncoming) {
+                    val userRowId = insertConversationMessageIgnoreSync(
+                        AiConversationMessage(
+                            packageName = packageName,
+                            senderKey = senderKey,
+                            senderDisplayName = senderDisplay,
+                            role = "user",
+                            content = cleanIncoming,
+                            timestamp = timestampMs,
+                            attemptId = null,
+                            incomingEventKey = incomingEventKey?.takeIf { it.isNotBlank() },
+                            executionStatus = AiConversationMessage.STATUS_USER_RECEIVED
+                        )
+                    )
+                    if (userRowId > 0L) insertedAny = true
+                }
+            }
+
+            if (!alreadyHasAssistant) {
+                val cleanReply = assistantReply.trim()
+                if (cleanReply.isNotEmpty()) {
+                    val maxExistingTs = getMaxMessageTimestampSync(packageName, senderKey) ?: 0L
+                    val effectiveAssistantTs = maxOf(timestampMs + 1L, maxExistingTs + 1L)
+                    val assistantRowId = insertConversationMessageIgnoreSync(
+                        AiConversationMessage(
+                            packageName = packageName,
+                            senderKey = senderKey,
+                            senderDisplayName = senderDisplay,
+                            role = "assistant",
+                            content = cleanReply,
+                            timestamp = effectiveAssistantTs,
+                            attemptId = attemptId,
+                            incomingEventKey = null,
+                            executionStatus = AiConversationMessage.STATUS_DISPATCHED
+                        )
+                    )
+                    if (assistantRowId > 0L) insertedAny = true
+                }
+            }
+
+            if (keepCount > 0) {
+                trimConversationMessagesSync(packageName, senderKey, keepCount)
+            }
+        }
+
+        if (notesEnabled && sanitizedNotes.isNotEmpty() && countNotesByAttemptIdSync(attemptId) == 0) {
+            val seenKeys = HashSet<String>()
+            sanitizedNotes.forEachIndexed { index, noteText ->
+                val dedupKey = AiPromptAndPolicyHelper.computeNoteDedupKey(noteText)
+                if (seenKeys.add(dedupKey)) {
+                    val noteRowId = insertNoteIgnoreSync(
+                        AiNote(
+                            senderName = senderDisplay,
+                            packageName = packageName,
+                            noteText = noteText,
+                            sourceMessage = incomingMessage,
+                            createdAt = timestampMs + index,
+                            isCompleted = false,
+                            attemptId = attemptId,
+                            noteDedupKey = dedupKey
+                        )
+                    )
+                    if (noteRowId > 0L) insertedAny = true
+                }
+            }
+        }
+
+        return insertedAny
+    }
 }

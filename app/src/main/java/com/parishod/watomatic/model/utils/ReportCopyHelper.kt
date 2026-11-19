@@ -47,6 +47,24 @@ object ReportCopyHelper {
         }
     }
 
+    private fun statusLabel(context: Context, status: String): String = when (status) {
+        com.parishod.watomatic.model.logs.ReplyHistoryStatus.DISPATCHED ->
+            context.getString(R.string.history_status_dispatched)
+        com.parishod.watomatic.model.logs.ReplyHistoryStatus.FAILED ->
+            context.getString(R.string.history_status_failed)
+        com.parishod.watomatic.model.logs.ReplyHistoryStatus.CANCELLED ->
+            context.getString(R.string.history_status_cancelled)
+        com.parishod.watomatic.model.logs.ReplyHistoryStatus.UNKNOWN ->
+            context.getString(R.string.history_status_unknown)
+        com.parishod.watomatic.model.logs.ReplyHistoryStatus.DISPATCHING ->
+            context.getString(R.string.history_status_dispatching)
+        com.parishod.watomatic.model.logs.ReplyHistoryStatus.GENERATED ->
+            context.getString(R.string.history_status_pending)
+        com.parishod.watomatic.model.logs.ReplyHistoryStatus.MIXED ->
+            context.getString(R.string.history_status_mixed)
+        else -> context.getString(R.string.history_status_legacy)
+    }
+
     fun formatReplyHistoryEntry(
         context: Context,
         row: ReplyHistoryRow,
@@ -61,15 +79,19 @@ object ReportCopyHelper {
                 ?: context.getString(R.string.history_no_incoming_text, sender)
             val source = item.matchedRuleName?.takeIf { it.isNotBlank() }
             val timeStr = dateFormatter.format(Date(item.lastReplyTime))
+            val statusText = statusLabel(context, item.executionStatus)
+            val replyText = item.repliedMessage.takeIf { it.isNotBlank() }
+                ?: context.getString(R.string.history_no_reply_text)
 
             buildString {
                 append(appName)
                 if (source != null) append(" [").append(source).append(']')
                 append(" • ").append(item.replyCount).append("x")
+                append(" • ").append(statusText)
                 append('\n')
                 append("From: ").append(sender).append(" • ").append(timeStr).append('\n')
                 append("Incoming: ").append(incoming).append('\n')
-                append("Reply: ").append(item.repliedMessage)
+                append("Reply: ").append(replyText)
             }
         }
         is ReplyHistoryRow.Timeline -> {
@@ -81,14 +103,23 @@ object ReportCopyHelper {
                 ?: context.getString(R.string.history_no_incoming_text, sender)
             val source = item.matchedRuleName?.takeIf { it.isNotBlank() }
             val timeStr = dateFormatter.format(Date(item.replyTime))
+            val statusText = statusLabel(context, item.executionStatus)
+            val replyText = item.repliedMessage.takeIf { it.isNotBlank() }
+                ?: context.getString(R.string.history_no_reply_text)
+            val noteRes = com.parishod.watomatic.activity.history.ReplyHistoryAdapter
+                .safeStatusNoteResFor(item.executionStatus, item.failureCategory)
 
             buildString {
                 append(appName)
                 if (source != null) append(" [").append(source).append(']')
+                append(" • ").append(statusText)
                 append('\n')
                 append("From: ").append(sender).append(" • ").append(timeStr).append('\n')
                 append("Incoming: ").append(incoming).append('\n')
-                append("Reply: ").append(item.repliedMessage)
+                append("Reply: ").append(replyText)
+                if (noteRes != null) {
+                    append('\n').append("Note: ").append(context.getString(noteRes))
+                }
             }
         }
     }

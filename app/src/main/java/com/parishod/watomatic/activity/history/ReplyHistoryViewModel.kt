@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.parishod.watomatic.model.logs.MessageLogsDB
 import com.parishod.watomatic.model.logs.ReplyHistoryDetailItem
 import com.parishod.watomatic.model.logs.ReplyHistoryRepository
+import com.parishod.watomatic.model.logs.ReplyHistoryStatus
 import com.parishod.watomatic.model.logs.ReplyHistorySummaryItem
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -19,6 +20,15 @@ enum class HistoryViewMode {
     TIMELINE
 }
 
+enum class HistoryStatusFilter {
+    ALL,
+    DISPATCHED,
+    FAILED,
+    CANCELLED,
+    UNKNOWN,
+    LEGACY
+}
+
 sealed class ReplyHistoryRow {
     data class Grouped(val item: ReplyHistorySummaryItem) : ReplyHistoryRow()
     data class Timeline(val item: ReplyHistoryDetailItem) : ReplyHistoryRow()
@@ -26,8 +36,10 @@ sealed class ReplyHistoryRow {
 
 data class ReplyHistoryUiState(
     val totalReplies: Int = 0,
+    val totalAttempts: Int = 0,
     val uniqueMessages: Int = 0,
     val mode: HistoryViewMode = HistoryViewMode.GROUPED,
+    val statusFilter: HistoryStatusFilter = HistoryStatusFilter.ALL,
     val searchQuery: String = "",
     val displayedRows: List<ReplyHistoryRow> = emptyList()
 )
@@ -35,22 +47,33 @@ data class ReplyHistoryUiState(
 class ReplyHistoryViewModel(application: Application) : AndroidViewModel(application) {
     private val repository: ReplyHistoryRepository by lazy {
         val db = MessageLogsDB.getInstance(application)
-        ReplyHistoryRepository(db.logsDao())
+        ReplyHistoryRepository(db.logsDao(), db.replyAttemptDao())
     }
 
     private val searchQuery = MutableStateFlow("")
     private val viewMode = MutableStateFlow(HistoryViewMode.GROUPED)
+    private val statusFilter = MutableStateFlow(HistoryStatusFilter.ALL)
+
+    private data class FilterInputs(
+        val query: String,
+        val mode: HistoryViewMode,
+        val status: HistoryStatusFilter
+    )
+
+    private val filterInputs = combine(searchQuery, viewMode, statusFilter) { query, mode, status ->
+        FilterInputs(query, mode, status)
+    }
 
     val uiState: StateFlow<ReplyHistoryUiState> = combine(
         repository.groupedReplyHistory,
         repository.allReplyHistory,
         repository.totalReplyCount,
-        searchQuery,
-        viewMode
-    ) { grouped, timeline, totalReplies, query, mode ->
-        val trimmedQuery = query.trim().lowercase()
+        repository.totalAttemptCount,
+        filterInputs
+    ) { grouped, timeline, totalReplies, totalAttempts, filters ->
+        val trimmedQuery = filters.query.trim().lowercase()
 
-        val rows: List<ReplyHistoryRow> = when (mode) {
+        val rows: List<ReplyHistoryRow> = when (filters.mode) {
             HistoryViewMode.GROUPED -> {
                 grouped
                     .filter { item ->
@@ -65,11 +88,12 @@ class ReplyHistoryViewModel(application: Application) : AndroidViewModel(applica
             HistoryViewMode.TIMELINE -> {
                 timeline
                     .filter { item ->
-                        trimmedQuery.isEmpty() ||
-                            (item.incomingMessage?.lowercase()?.contains(trimmedQuery) == true) ||
-                            item.repliedMessage.lowercase().contains(trimmedQuery) ||
-                            (item.senderName?.lowercase()?.contains(trimmedQuery) == true) ||
-                            (item.matchedRuleName?.lowercase()?.contains(trimmedQuery) == true)
+                        matchesStatusFilter(item.executionStatus, filters.status) &&
+                            (trimmedQuery.isEmpty() ||
+                                (item.incomingMessage?.lowercase()?.contains(trimmedQuery) == true) ||
+                                item.repliedMessage.lowercase().contains(trimmedQuery) ||
+                                (item.senderName?.lowercase()?.contains(trimmedQuery) == true) ||
+                                (item.matchedRuleName?.lowercase()?.contains(trimmedQuery) == true))
                     }
                     .map { ReplyHistoryRow.Timeline(it) }
             }
@@ -77,9 +101,11 @@ class ReplyHistoryViewModel(application: Application) : AndroidViewModel(applica
 
         ReplyHistoryUiState(
             totalReplies = totalReplies,
+            totalAttempts = totalAttempts,
             uniqueMessages = grouped.size,
-            mode = mode,
-            searchQuery = query,
+            mode = filters.mode,
+            statusFilter = filters.status,
+            searchQuery = filters.query,
             displayedRows = rows
         )
     }.stateIn(
@@ -96,9 +122,19 @@ class ReplyHistoryViewModel(application: Application) : AndroidViewModel(applica
         viewMode.value = mode
     }
 
+    fun setStatusFilter(filter: HistoryStatusFilter) {
+        statusFilter.value = filter
+    }
+
     fun deleteEntry(logId: Int) {
         viewModelScope.launch {
             repository.deleteReplyById(logId)
+        }
+    }
+
+    fun deleteTimelineEntry(item: ReplyHistoryDetailItem) {
+        viewModelScope.launch {
+            repository.deleteTimelineItem(item)
         }
     }
 
@@ -107,4 +143,14 @@ class ReplyHistoryViewModel(application: Application) : AndroidViewModel(applica
             repository.clearAllHistory()
         }
     }
+
+    private fun matchesStatusFilter(status: String, filter: HistoryStatusFilter): Boolean =
+        when (filter) {
+            HistoryStatusFilter.ALL -> true
+            HistoryStatusFilter.DISPATCHED -> status == ReplyHistoryStatus.DISPATCHED
+            HistoryStatusFilter.FAILED -> status == ReplyHistoryStatus.FAILED
+            HistoryStatusFilter.CANCELLED -> status == ReplyHistoryStatus.CANCELLED
+            HistoryStatusFilter.UNKNOWN -> status == ReplyHistoryStatus.UNKNOWN
+            HistoryStatusFilter.LEGACY -> status == ReplyHistoryStatus.LEGACY
+        }
 }

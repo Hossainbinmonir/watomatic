@@ -737,4 +737,50 @@
     <string name="ai_notes_report_copied_toast">Notes report copied</string>
     <string name="ai_status_copy_desc">Copy AI status</string>
     <string name="ai_status_copied_toast">AI status copied</string>
+
+    <!-- Reply History Execution Statuses (Stage 02.3) -->
+    <string name="history_source_ai_fallback">AI Fallback</string>
+    <string name="history_status_dispatched">Dispatched</string>
+    <string name="history_status_failed">Failed</string>
+    <string name="history_status_cancelled">Cancelled</string>
+    <string name="history_status_unknown">Uncertain</string>
+    <string name="history_status_pending">Pending</string>
+    <string name="history_status_dispatching">Dispatching</string>
+    <string name="history_status_legacy">Legacy</string>
+    <string name="history_status_mixed">Legacy &amp; Dispatched</string>
+
+    <string name="history_reply_dispatched_label">Reply Dispatched</string>
+    <string name="history_reply_legacy_label">Recorded Reply (Legacy)</string>
+    <string name="history_reply_failed_label">Attempted Reply (Failed)</string>
+    <string name="history_reply_cancelled_label">Attempted Reply (Cancelled)</string>
+    <string name="history_reply_unknown_label">Attempted Reply (Outcome Uncertain)</string>
+    <string name="history_reply_pending_label">Prepared Reply (Pending)</string>
+    <string name="history_no_reply_text">(No reply text)</string>
+
+    <string name="history_filter_all">All</string>
+    <string name="history_filter_dispatched">Dispatched</string>
+    <string name="history_filter_failed">Failed</string>
+    <string name="history_filter_cancelled">Cancelled</string>
+    <string name="history_filter_unknown">Uncertain</string>
+    <string name="history_filter_legacy">Legacy</string>
+
+    <string name="history_grouped_only_attempts_subtitle">No confirmed dispatches yet. Switch to All Replies to view failed, cancelled, or uncertain attempts.</string>
+
+    <string name="history_note_unknown_general">Notification dispatch outcome is uncertain and was not automatically retried.</string>
+    <string name="history_note_reason_shutdown">Cancelled because the notification service was shutting down.</string>
+    <string name="history_note_reason_invalid_text">Failed because the generated reply text was invalid.</string>
+    <string name="history_note_reason_missing_wear">Failed because notification reply data was missing.</string>
+    <string name="history_note_reason_missing_remote_input">Failed because the notification does not accept free-form replies.</string>
+    <string name="history_note_reason_missing_pending_intent">Failed because the notification reply action was unavailable.</string>
+    <string name="history_note_reason_concurrent">Cancelled because another reply dispatch was already in progress.</string>
+    <string name="history_note_reason_canceled">Cancelled because the notification reply action expired or was dismissed.</string>
+    <string name="history_note_reason_security">Failed due to system permission or security restriction.</string>
+    <string name="history_note_reason_ambiguous_security">Outcome uncertain due to a system security error during dispatch.</string>
+    <string name="history_note_reason_ambiguous_send">Outcome uncertain due to an unexpected dispatch error; not retried.</string>
+    <string name="history_note_reason_duplicate_event">Cancelled because a reply for this notification was already handled.</string>
+    <string name="history_note_reason_unknown_locked">Cancelled because a previous dispatch attempt for this notification had an uncertain outcome.</string>
+    <string name="history_note_reason_generated_interrupted">Cancelled because the service restarted before dispatch started.</string>
+    <string name="history_note_reason_dispatching_interrupted">Outcome uncertain because the service restarted during dispatch; not retried.</string>
+    <string name="history_note_reason_claim_persistence">Failed because reply tracking storage was unavailable; not retried.</string>
+    <string name="history_note_reason_unclassified">Execution did not complete successfully.</string>
 </resources>

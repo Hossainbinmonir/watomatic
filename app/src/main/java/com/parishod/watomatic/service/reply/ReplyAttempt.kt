@@ -25,7 +25,8 @@ data class ReplyAttempt(
     val replyText: String? = null,
     val status: ReplyExecutionStatus = ReplyExecutionStatus.GENERATED,
     val createdAtMs: Long = System.currentTimeMillis(),
-    val updatedAtMs: Long = createdAtMs
+    val updatedAtMs: Long = createdAtMs,
+    val eventKey: String? = null
 ) {
     fun transitionTo(
         newStatus: ReplyExecutionStatus,
@@ -40,13 +41,34 @@ data class ReplyAttempt(
             sourceLabel: String? = null,
             packageName: String = "",
             notificationKey: String? = null,
-            replyText: String? = null
+            replyText: String? = null,
+            eventKey: String? = null
         ): ReplyAttempt = ReplyAttempt(
             sourceType = sourceType,
             sourceLabel = sourceLabel,
             packageName = packageName,
             notificationKey = notificationKey,
-            replyText = replyText
+            replyText = replyText,
+            eventKey = eventKey
+        )
+
+        @JvmStatic
+        fun createWithAttemptId(
+            attemptId: String,
+            sourceType: ReplySourceType = ReplySourceType.DEFAULT,
+            sourceLabel: String? = null,
+            packageName: String = "",
+            notificationKey: String? = null,
+            replyText: String? = null,
+            eventKey: String? = null
+        ): ReplyAttempt = ReplyAttempt(
+            attemptId = attemptId,
+            sourceType = sourceType,
+            sourceLabel = sourceLabel,
+            packageName = packageName,
+            notificationKey = notificationKey,
+            replyText = replyText,
+            eventKey = eventKey
         )
     }
 }

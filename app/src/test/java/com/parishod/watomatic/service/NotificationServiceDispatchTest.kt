@@ -31,6 +31,7 @@ import okio.Timeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -41,6 +42,9 @@ import org.robolectric.annotation.Config
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
@@ -308,12 +312,344 @@ class NotificationServiceDispatchTest {
     }
 
     @Test
-    fun `service onDestroy shuts down active ReplyExecutionManager`() {
+    fun `service onDestroy shuts down active ReplyExecutionManager and returns null thereafter`() {
         val manager = service.replyExecutionManager
         assertFalse(manager.isShutDown())
+        assertFalse(service.isServiceDestroyed)
 
         service.onDestroy()
+        assertTrue(service.isServiceDestroyed)
         assertTrue(manager.isShutDown())
+        assertNull(service.replyExecutionManager)
+    }
+
+    @Test
+    fun `sendActualReply after onDestroy returns CANCELLED and executes zero dispatches or DB writes`() {
+        val sendCount = AtomicInteger(0)
+        val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+            sendCount.incrementAndGet()
+        })
+        service.setReplyExecutionManagerForTesting(manager)
+        service.onDestroy()
+
+        val sbn = buildNotificationSbn(id = 28)
+        val result = service.sendActualReply(sbn, wearFromSbn(sbn), "Late reply", null, ReplySourceType.DEFAULT)
+
+        assertEquals(ReplyExecutionStatus.CANCELLED, result.status)
+        assertFalse(result.dispatchAttempted)
+        assertFalse(result.dispatchedNormally)
+        assertEquals(ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN, result.failureCategory)
+        assertEquals(0, sendCount.get())
+        assertEquals(0L, dbUtils.numReplies)
+        assertNull(service.replyExecutionManager)
+    }
+
+    @Test
+    fun `late AI callbacks after onDestroy do not recreate manager, dispatch replies, log DB entries, or record errors`() {
+        val sendCount = AtomicInteger(0)
+        val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+            sendCount.incrementAndGet()
+        })
+        service.setReplyExecutionManagerForTesting(manager)
+
+        val deferredCallbacks = mutableListOf<() -> Unit>()
+        val deferredOpenAiApi = object : OpenAIService {
+            override fun getChatCompletion(authorization: String, requestBody: OpenAIRequest): Call<OpenAIResponse> =
+                deferredCall()
+
+            override fun getChatCompletion(url: String, auth: String, request: OpenAIRequest): Call<OpenAIResponse> =
+                deferredCall { cb ->
+                    deferredCallbacks.add {
+                        cb.onResponse(
+                            immediateCall(Response.error<OpenAIResponse>(503, """{"err":"down"}""".toResponseBody("application/json".toMediaType()))),
+                            Response.error(503, """{"err":"down"}""".toResponseBody("application/json".toMediaType()))
+                        )
+                    }
+                    deferredCallbacks.add {
+                        cb.onFailure(
+                            immediateCall(Response.error<OpenAIResponse>(503, "".toResponseBody("application/json".toMediaType()))),
+                            java.io.IOException("late timeout")
+                        )
+                    }
+                }
+
+            override fun getClaudeCompletion(url: String, headers: Map<String, String>, request: JsonObject): Call<JsonObject> =
+                deferredJsonCall { cb ->
+                    val okJson = JsonObject().apply {
+                        add("content", com.google.gson.JsonArray().apply {
+                            add(JsonObject().apply { addProperty("text", "Late Claude reply") })
+                        })
+                    }
+                    deferredCallbacks.add { cb.onResponse(immediateCall(Response.success(okJson)), Response.success(okJson)) }
+                    deferredCallbacks.add { cb.onFailure(immediateCall(Response.success(okJson)), java.io.IOException("claude timeout")) }
+                }
+
+            override fun getGeminiCompletion(url: String, apiKey: String, request: JsonObject): Call<JsonObject> =
+                deferredJsonCall { cb ->
+                    val okJson = JsonObject().apply {
+                        add("candidates", com.google.gson.JsonArray().apply {
+                            add(JsonObject().apply {
+                                add("content", JsonObject().apply {
+                                    add("parts", com.google.gson.JsonArray().apply {
+                                        add(JsonObject().apply { addProperty("text", "Late Gemini reply") })
+                                    })
+                                })
+                            })
+                        })
+                    }
+                    deferredCallbacks.add { cb.onResponse(immediateCall(Response.success(okJson)), Response.success(okJson)) }
+                    deferredCallbacks.add { cb.onFailure(immediateCall(Response.success(okJson)), java.io.IOException("gemini timeout")) }
+                }
+
+            override fun getModels(authorization: String): Call<OpenAIModelsResponse> = error("unused")
+            override fun getModels(headers: Map<String, String>): Call<OpenAIModelsResponse> = error("unused")
+            override fun getModelsDynamic(url: String, headers: Map<String, String>): Call<JsonElement> = error("unused")
+        }
+
+        val fetchOpenAi = NotificationService::class.java.getDeclaredMethod(
+            "fetchOpenAiCompatibleReply",
+            PreferencesManager::class.java, OpenAIService::class.java, String::class.java, String::class.java,
+            String::class.java, String::class.java, String::class.java, String::class.java, String::class.java,
+            String::class.java, List::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, String::class.java, StatusBarNotification::class.java,
+            NotificationWear::class.java, String::class.java
+        ).apply { isAccessible = true }
+        val fetchClaude = NotificationService::class.java.getDeclaredMethod(
+            "fetchClaudeReply",
+            PreferencesManager::class.java, OpenAIService::class.java, String::class.java, String::class.java,
+            String::class.java, String::class.java, String::class.java, String::class.java, String::class.java,
+            String::class.java, List::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, String::class.java, StatusBarNotification::class.java,
+            NotificationWear::class.java, String::class.java
+        ).apply { isAccessible = true }
+        val fetchGemini = NotificationService::class.java.getDeclaredMethod(
+            "fetchGeminiReply",
+            PreferencesManager::class.java, OpenAIService::class.java, String::class.java, String::class.java,
+            String::class.java, String::class.java, String::class.java, String::class.java, String::class.java,
+            String::class.java, List::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, String::class.java, StatusBarNotification::class.java,
+            NotificationWear::class.java, String::class.java
+        ).apply { isAccessible = true }
+        val handleSuccess = NotificationService::class.java.getDeclaredMethod(
+            "handleSuccessfulAiReply",
+            PreferencesManager::class.java, StatusBarNotification::class.java, NotificationWear::class.java,
+            String::class.java, String::class.java, String::class.java, String::class.java, String::class.java,
+            Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Int::class.javaPrimitiveType, String::class.java
+        ).apply { isAccessible = true }
+
+        val sbn1 = buildNotificationSbn(id = 29)
+        val sbn2 = buildNotificationSbn(id = 30)
+        val sbn3 = buildNotificationSbn(id = 31)
+
+        // Enqueue in-flight calls BEFORE onDestroy
+        fetchOpenAi.invoke(
+            service, prefs, deferredOpenAiApi, "https://api.openai.com/", "sk-test",
+            "gpt-4o-mini", "sys", "com.whatsapp", "alice", "Alice",
+            "hello", emptyList<AiConversationMessage>(), false, false, 10, "AI",
+            sbn1, wearFromSbn(sbn1), "Fallback"
+        )
+        fetchClaude.invoke(
+            service, prefs, deferredOpenAiApi, "https://api.anthropic.com/", "sk-test",
+            "claude-sonnet-4-20250514", "sys", "com.whatsapp", "alice", "Alice",
+            "hello", emptyList<AiConversationMessage>(), false, false, 10, "AI",
+            sbn2, wearFromSbn(sbn2), "Fallback"
+        )
+        fetchGemini.invoke(
+            service, prefs, deferredOpenAiApi, "https://generativelanguage.googleapis.com/", "sk-test",
+            "gemini-2.5-flash", "sys", "com.whatsapp", "alice", "Alice",
+            "hello", emptyList<AiConversationMessage>(), false, false, 10, "AI",
+            sbn3, wearFromSbn(sbn3), "Fallback"
+        )
+        assertEquals(6, deferredCallbacks.size)
+
+        // Now destroy service before any callback delivers
+        service.onDestroy()
+
+        // Deliver all late callbacks + direct handleSuccessfulAiReply
+        deferredCallbacks.forEach { it.invoke() }
+        handleSuccess.invoke(
+            service, prefs, sbn1, wearFromSbn(sbn1),
+            "com.whatsapp", "alice", "Alice", "hello", "Late direct reply",
+            false, false, 10, "AI"
+        )
+
+        assertEquals(0, sendCount.get())
+        assertEquals(0L, dbUtils.numReplies)
+        assertNull(prefs.openAILastPersistentErrorMessage)
+        assertNull(service.replyExecutionManager)
+    }
+
+    @Test
+    fun `concurrent onDestroy and sendActualReply leaves no active manager and never dispatches after shutdown`() {
+        val dispatchCount = AtomicInteger(0)
+        val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+            dispatchCount.incrementAndGet()
+        })
+        service.setReplyExecutionManagerForTesting(manager)
+
+        val workerPool = Executors.newFixedThreadPool(4)
+        val startGate = CountDownLatch(1)
+        try {
+            val destroyFuture = workerPool.submit {
+                assertTrue(startGate.await(5, TimeUnit.SECONDS))
+                service.onDestroy()
+            }
+            val dispatchFutures = (1..8).map { index ->
+                val sbn = buildNotificationSbn(id = 40 + index)
+                val wear = wearFromSbn(sbn)
+                workerPool.submit<com.parishod.watomatic.service.reply.ReplyExecutionResult> {
+                    assertTrue(startGate.await(5, TimeUnit.SECONDS))
+                    service.sendActualReply(sbn, wear, "Concurrent $index", null, ReplySourceType.DEFAULT)
+                }
+            }
+
+            startGate.countDown()
+            destroyFuture.get(5, TimeUnit.SECONDS)
+            val results = dispatchFutures.map { it.get(5, TimeUnit.SECONDS) }
+
+            assertTrue(service.isServiceDestroyed)
+            assertTrue(manager.isShutDown())
+            assertNull(service.replyExecutionManager)
+            assertEquals(results.count { it.isDispatched() }, dispatchCount.get())
+            assertTrue(results.all { it.isDispatched() || it.status == ReplyExecutionStatus.CANCELLED })
+
+            // Any further invocation strictly after onDestroy must always be CANCELLED
+            val afterDestroySbn = buildNotificationSbn(id = 99)
+            val afterDestroyResult = service.sendActualReply(
+                afterDestroySbn, wearFromSbn(afterDestroySbn), "Post destroy", null, ReplySourceType.DEFAULT
+            )
+            assertEquals(ReplyExecutionStatus.CANCELLED, afterDestroyResult.status)
+            assertEquals(ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN, afterDestroyResult.failureCategory)
+            assertEquals(dispatchCount.get().toLong(), dbUtils.numReplies)
+        } finally {
+            workerPool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `sendActualReply persists reply_attempts and DISPATCHED logs across all active reply paths`() {
+        val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ -> })
+        service.setReplyExecutionManagerForTesting(manager)
+
+        val db = MessageLogsDB.getInstance(context)
+
+        // 1. DEFAULT
+        val sbnDefault = buildNotificationSbn(sender = "U1", message = "M1", id = 101)
+        val resDefault = service.sendActualReply(sbnDefault, wearFromSbn(sbnDefault), "Default msg", null, ReplySourceType.DEFAULT)
+        assertEquals(ReplyExecutionStatus.DISPATCHED, resDefault.status)
+        val attDefault = db.replyAttemptDao().getAttemptByIdSync(resDefault.executionId)!!
+        assertEquals(ReplySourceType.DEFAULT.name, attDefault.sourceType)
+        assertEquals("DISPATCHED", attDefault.status)
+
+        // 2. RULE_STATIC
+        val sbnRule = buildNotificationSbn(sender = "U2", message = "M2", id = 102)
+        val resRule = service.sendActualReply(sbnRule, wearFromSbn(sbnRule), "Rule msg", "Hours Rule", ReplySourceType.RULE_STATIC)
+        val attRule = db.replyAttemptDao().getAttemptByIdSync(resRule.executionId)!!
+        assertEquals(ReplySourceType.RULE_STATIC.name, attRule.sourceType)
+        assertEquals("Hours Rule", attRule.sourceLabel)
+        assertEquals("DISPATCHED", attRule.status)
+
+        // 3 & 4. GLOBAL_AI and RULE_AI via handleSuccessfulAiReply
+        val handleSuccess = NotificationService::class.java.getDeclaredMethod(
+            "handleSuccessfulAiReply",
+            PreferencesManager::class.java, StatusBarNotification::class.java, NotificationWear::class.java,
+            String::class.java, String::class.java, String::class.java, String::class.java, String::class.java,
+            Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Int::class.javaPrimitiveType, String::class.java
+        ).apply { isAccessible = true }
+
+        val sbnGlobalAi = buildNotificationSbn(sender = "U3", message = "M3", id = 103)
+        handleSuccess.invoke(
+            service, prefs, sbnGlobalAi, wearFromSbn(sbnGlobalAi),
+            "com.whatsapp", "u3", "U3", "M3", "Global AI text",
+            false, false, 10, "AI Reply"
+        )
+        val sbnRuleAi = buildNotificationSbn(sender = "U4", message = "M4", id = 104)
+        handleSuccess.invoke(
+            service, prefs, sbnRuleAi, wearFromSbn(sbnRuleAi),
+            "com.whatsapp", "u4", "U4", "M4", "Rule AI text",
+            false, false, 10, "Support • AI Reply"
+        )
+
+        // 5. Direct AI_FALLBACK
+        val sbnFallback = buildNotificationSbn(sender = "U5", message = "M5", id = 105)
+        val resFallback = service.sendActualReply(sbnFallback, wearFromSbn(sbnFallback), "Fallback direct", null, ReplySourceType.AI_FALLBACK)
+        val attFallback = db.replyAttemptDao().getAttemptByIdSync(resFallback.executionId)!!
+        assertEquals(ReplySourceType.AI_FALLBACK.name, attFallback.sourceType)
+        assertEquals("AI Fallback", attFallback.sourceLabel)
+
+        // 6. Provider HTTP failure -> AI_FALLBACK
+        val errResponse = Response.error<OpenAIResponse>(500, """{"err":"fail"}""".toResponseBody("application/json".toMediaType()))
+        val fakeApi = object : OpenAIService {
+            override fun getChatCompletion(authorization: String, requestBody: OpenAIRequest): Call<OpenAIResponse> = immediateCall(errResponse)
+            override fun getChatCompletion(url: String, auth: String, request: OpenAIRequest): Call<OpenAIResponse> = immediateCall(errResponse)
+            override fun getClaudeCompletion(url: String, headers: Map<String, String>, request: JsonObject): Call<JsonObject> = error("unused")
+            override fun getGeminiCompletion(url: String, apiKey: String, request: JsonObject): Call<JsonObject> = error("unused")
+            override fun getModels(authorization: String): Call<OpenAIModelsResponse> = error("unused")
+            override fun getModels(headers: Map<String, String>): Call<OpenAIModelsResponse> = error("unused")
+            override fun getModelsDynamic(url: String, headers: Map<String, String>): Call<JsonElement> = error("unused")
+        }
+        val fetchOpenAi = NotificationService::class.java.getDeclaredMethod(
+            "fetchOpenAiCompatibleReply",
+            PreferencesManager::class.java, OpenAIService::class.java, String::class.java, String::class.java,
+            String::class.java, String::class.java, String::class.java, String::class.java, String::class.java,
+            String::class.java, List::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, String::class.java, StatusBarNotification::class.java,
+            NotificationWear::class.java, String::class.java
+        ).apply { isAccessible = true }
+        val sbnProviderFail = buildNotificationSbn(sender = "U6", message = "M6", id = 106)
+        fetchOpenAi.invoke(
+            service, prefs, fakeApi, "https://api.openai.com/", "sk-test",
+            "gpt-4o-mini", "sys", "com.whatsapp", "u6", "U6",
+            "M6", emptyList<AiConversationMessage>(), false, false, 10, "AI Reply",
+            sbnProviderFail, wearFromSbn(sbnProviderFail), "Provider error fallback"
+        )
+
+        val attempts = db.replyAttemptDao().getAllAttemptsSync()
+        assertEquals(6, attempts.size)
+        assertTrue(attempts.all { it.status == "DISPATCHED" })
+        assertTrue(attempts.any { it.sourceType == ReplySourceType.GLOBAL_AI.name })
+        assertTrue(attempts.any { it.sourceType == ReplySourceType.RULE_AI.name })
+        assertEquals(2, attempts.count { it.sourceType == ReplySourceType.AI_FALLBACK.name })
+        assertEquals(6L, dbUtils.numReplies)
+    }
+
+    @Test
+    fun `database write failure never alters actual ReplyExecutionResult for DISPATCHED or FAILED`() {
+        val throwingDbUtils = object : DbUtils(context) {
+            override fun recordAttemptTransition(
+                attempt: com.parishod.watomatic.service.reply.ReplyAttempt,
+                senderName: String?,
+                incomingMsg: String?
+            ) {
+                throw IllegalStateException("Simulated SQLite transition write error")
+            }
+
+            override fun recordAttemptResult(
+                attempt: com.parishod.watomatic.service.reply.ReplyAttempt,
+                result: com.parishod.watomatic.service.reply.ReplyExecutionResult,
+                senderName: String?,
+                incomingMsg: String?,
+                sbn: StatusBarNotification?
+            ) {
+                throw IllegalStateException("Simulated SQLite result write error")
+            }
+        }
+        service.setDbUtilsForTesting(throwingDbUtils)
+
+        val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ -> })
+        service.setReplyExecutionManagerForTesting(manager)
+
+        val sbnOk = buildNotificationSbn(id = 201)
+        val okResult = service.sendActualReply(sbnOk, wearFromSbn(sbnOk), "Should succeed", null, ReplySourceType.DEFAULT)
+        assertEquals(ReplyExecutionStatus.DISPATCHED, okResult.status)
+        assertTrue(okResult.isDispatched())
+
+        val sbnFail = buildNotificationSbn(id = 202)
+        val failWear = NotificationWear("com.whatsapp", null, wearFromSbn(sbnFail).remoteInputs, null, sbnFail.tag, sbnFail.id.toString())
+        val failResult = service.sendActualReply(sbnFail, failWear, "Should fail", null, ReplySourceType.DEFAULT)
+        assertEquals(ReplyExecutionStatus.FAILED, failResult.status)
+        assertEquals(ReplyExecutionManager.FAILURE_MISSING_PENDING_INTENT, failResult.failureCategory)
+        assertFalse(failResult.isDispatched())
     }
 
     private fun <T> immediateCall(response: Response<T>): Call<T> = object : Call<T> {
@@ -323,6 +659,28 @@ class NotificationServiceDispatchTest {
         override fun isCanceled(): Boolean = false
         override fun cancel() {}
         override fun execute(): Response<T> = response
+        override fun request(): Request = Request.Builder().url("https://localhost/").build()
+        override fun timeout(): Timeout = Timeout.NONE
+    }
+
+    private fun deferredCall(onEnqueue: (Callback<OpenAIResponse>) -> Unit = {}): Call<OpenAIResponse> = object : Call<OpenAIResponse> {
+        override fun enqueue(callback: Callback<OpenAIResponse>) = onEnqueue(callback)
+        override fun isExecuted(): Boolean = false
+        override fun clone(): Call<OpenAIResponse> = this
+        override fun isCanceled(): Boolean = false
+        override fun cancel() {}
+        override fun execute(): Response<OpenAIResponse> = error("unused")
+        override fun request(): Request = Request.Builder().url("https://localhost/").build()
+        override fun timeout(): Timeout = Timeout.NONE
+    }
+
+    private fun deferredJsonCall(onEnqueue: (Callback<JsonObject>) -> Unit = {}): Call<JsonObject> = object : Call<JsonObject> {
+        override fun enqueue(callback: Callback<JsonObject>) = onEnqueue(callback)
+        override fun isExecuted(): Boolean = false
+        override fun clone(): Call<JsonObject> = this
+        override fun isCanceled(): Boolean = false
+        override fun cancel() {}
+        override fun execute(): Response<JsonObject> = error("unused")
         override fun request(): Request = Request.Builder().url("https://localhost/").build()
         override fun timeout(): Timeout = Timeout.NONE
     }

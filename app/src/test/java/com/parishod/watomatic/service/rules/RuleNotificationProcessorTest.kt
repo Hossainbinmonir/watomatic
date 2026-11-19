@@ -12,10 +12,13 @@ import androidx.test.core.app.ApplicationProvider
 import com.parishod.watomatic.NotificationWear
 import com.parishod.watomatic.activity.rules.CreateEditRuleActivity
 import com.parishod.watomatic.activity.rules.RuleDashboardActivity
+import com.parishod.watomatic.model.logs.MessageLogsDB
 import com.parishod.watomatic.model.preferences.PreferencesManager
 import com.parishod.watomatic.model.rules.AutoReplyRule
 import com.parishod.watomatic.model.rules.AutoReplyRulesDatabase
 import com.parishod.watomatic.model.rules.MatchType
+import com.parishod.watomatic.model.utils.Constants
+import com.parishod.watomatic.service.reply.PendingClaimHandoff
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -51,6 +54,9 @@ class RuleNotificationProcessorTest {
         PreferencesManager.resetInstance()
         AutoReplyRulesDatabase.resetInstance()
         context.deleteDatabase(AutoReplyRulesDatabase.DB_NAME)
+        MessageLogsDB.resetInstance()
+        context.deleteDatabase(Constants.LOGS_DB_NAME)
+        PendingClaimHandoff.clear()
 
         PreferencesManager.getPreferencesInstance(context).setServicePref(true)
         PreferencesManager.getPreferencesInstance(context).setAppendWatomaticAttribution(false)
@@ -65,6 +71,9 @@ class RuleNotificationProcessorTest {
     fun tearDown() {
         processor.shutdown()
         executor.shutdownNow()
+        PendingClaimHandoff.clear()
+        MessageLogsDB.resetInstance()
+        context.deleteDatabase(Constants.LOGS_DB_NAME)
         AutoReplyRulesDatabase.resetInstance()
         context.deleteDatabase(AutoReplyRulesDatabase.DB_NAME)
         PreferencesManager.resetInstance()

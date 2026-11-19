@@ -8,7 +8,8 @@ import androidx.room.PrimaryKey
 @Entity(
     tableName = "ai_notes",
     indices = [
-        Index(value = ["is_completed", "created_at"])
+        Index(value = ["is_completed", "created_at"]),
+        Index(value = ["attempt_id", "note_dedup_key"], unique = true)
     ]
 )
 data class AiNote(
@@ -31,5 +32,32 @@ data class AiNote(
     val createdAt: Long = System.currentTimeMillis(),
 
     @ColumnInfo(name = "is_completed")
-    val isCompleted: Boolean = false
-)
+    val isCompleted: Boolean = false,
+
+    @ColumnInfo(name = "attempt_id")
+    val attemptId: String? = null,
+
+    @ColumnInfo(name = "note_dedup_key")
+    val noteDedupKey: String? = null
+) {
+    @androidx.room.Ignore
+    constructor(
+        id: Long,
+        senderName: String,
+        packageName: String,
+        noteText: String,
+        sourceMessage: String,
+        createdAt: Long,
+        isCompleted: Boolean
+    ) : this(
+        id = id,
+        senderName = senderName,
+        packageName = packageName,
+        noteText = noteText,
+        sourceMessage = sourceMessage,
+        createdAt = createdAt,
+        isCompleted = isCompleted,
+        attemptId = null,
+        noteDedupKey = null
+    )
+}

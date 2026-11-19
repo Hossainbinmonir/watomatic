@@ -25,13 +25,65 @@ object AiPromptAndPolicyHelper {
     const val UNKNOWN_SENDER = "__unknown_sender__"
     const val DEFAULT_NOTE_CONFIRMATION = "Noted! I have saved this reminder."
 
-    private val SAVE_NOTE_REGEX = Regex("(?is)\\[\\[\\s*SAVE_NOTE\\s*:\\s*(.*?)\\s*\\]\\]")
+    private val SAVE_NOTE_REGEX = Regex("(?is)\\[\\[\\s*SAVE_NOTE\\s*:\\s*(.*?)\\s*(?:\\]\\])+")
+    private val ANY_HIDDEN_MARKER_REGEX = Regex("(?is)\\[\\[.*?\\]\\]")
+    private val UNCLOSED_HIDDEN_MARKER_REGEX = Regex("(?is)\\[\\[.*$")
     private val TRAILING_BLANK_LINES = Regex("\n{3,}")
+    private val SENSITIVE_TOKEN_REGEX = Regex(
+        "(?i)(Bearer\\s+[A-Za-z0-9._\\-]{8,}|\\bsk-[A-Za-z0-9_\\-]{10,}|\\bAIza[0-9A-Za-z_\\-]{10,})"
+    )
+    private val INTERNAL_ERROR_PREFIX_REGEX = Regex(
+        "(?i)^(HTTP\\s+[1-5][0-9]{2}\\s*\\(|Network\\s+error\\s*\\(|Secure\\s+encrypted\\s+credential\\s+storage|IllegalStateException:|SecurityException:|RuntimeException:|Exception:|Stacktrace:).*"
+    )
 
     @JvmStatic
     fun normalizeSenderKey(senderName: String?): String {
         val trimmed = senderName?.trim()?.lowercase(Locale.ROOT).orEmpty()
         return trimmed.ifEmpty { UNKNOWN_SENDER }
+    }
+
+    @JvmStatic
+    fun sanitizeExtractedNote(rawNote: String?): String? {
+        if (rawNote.isNullOrBlank()) return null
+        val cleaned = ANY_HIDDEN_MARKER_REGEX.replace(rawNote, "")
+            .replace(UNCLOSED_HIDDEN_MARKER_REGEX, "")
+            .replace("[[", "")
+            .replace("]]", "")
+            .replace(TRAILING_BLANK_LINES, "\n\n")
+            .trim()
+        if (cleaned.isEmpty()) return null
+        if (SENSITIVE_TOKEN_REGEX.containsMatchIn(cleaned)) return null
+        if (INTERNAL_ERROR_PREFIX_REGEX.matches(cleaned.replace("\n", " ").trim())) return null
+        return cleaned
+    }
+
+    @JvmStatic
+    fun computeNoteDedupKey(noteText: String): String {
+        val normalized = noteText.trim().lowercase(Locale.ROOT).replace(Regex("\\s+"), " ")
+        return sha256Hex(normalized)
+    }
+
+    @JvmStatic
+    fun buildIncomingEventKey(
+        sbnKey: String?,
+        postTimeMs: Long,
+        whenMs: Long,
+        packageName: String,
+        senderKey: String,
+        incomingMessage: String
+    ): String {
+        val raw = "${sbnKey.orEmpty()}|$postTimeMs|$whenMs|$packageName|$senderKey|${incomingMessage.trim()}"
+        return "in_${sha256Hex(raw)}"
+    }
+
+    private fun sha256Hex(input: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(input.toByteArray(Charsets.UTF_8))
+        val sb = StringBuilder(digest.size * 2)
+        for (b in digest) {
+            sb.append(String.format(Locale.US, "%02x", b.toInt() and 0xFF))
+        }
+        return sb.toString()
     }
 
     @JvmStatic
@@ -43,9 +95,10 @@ object AiPromptAndPolicyHelper {
 
         val notes = mutableListOf<String>()
         for (match in SAVE_NOTE_REGEX.findAll(raw)) {
-            val captured = match.groupValues.getOrNull(1)?.trim().orEmpty()
-            if (captured.isNotEmpty()) {
-                notes.add(captured)
+            val captured = match.groupValues.getOrNull(1)
+            val sanitized = sanitizeExtractedNote(captured)
+            if (sanitized != null) {
+                notes.add(sanitized)
             }
         }
 
