@@ -45,7 +45,8 @@ import kotlinx.coroutines.withContext
 class ManualReplyConfigurationActivity : BaseActivity() {
 
     companion object {
-        private const val MIN_COOLDOWN_SECONDS = 10L
+        private const val MIN_COOLDOWN_SECONDS = 0L
+        private const val MAX_COOLDOWN_SECONDS = 86400L
     }
 
     private lateinit var customRepliesData: CustomRepliesData
@@ -235,7 +236,8 @@ class ManualReplyConfigurationActivity : BaseActivity() {
         chipGroupCooldownPresets.setOnCheckedStateChangeListener { _, checkedIds ->
             if (isPopulating) return@setOnCheckedStateChangeListener
             val presetSeconds = when (checkedIds.firstOrNull()) {
-                R.id.chip_manual_cd_min -> 10L
+                R.id.chip_manual_cd_off -> 0L
+                R.id.chip_manual_cd_10s -> 10L
                 R.id.chip_manual_cd_30s -> 30L
                 R.id.chip_manual_cd_1m -> 60L
                 R.id.chip_manual_cd_5m -> 300L
@@ -328,7 +330,8 @@ class ManualReplyConfigurationActivity : BaseActivity() {
 
     private fun syncCooldownPresetChip(seconds: Long) {
         val targetId = when (seconds) {
-            10L -> R.id.chip_manual_cd_min
+            0L -> R.id.chip_manual_cd_off
+            10L -> R.id.chip_manual_cd_10s
             30L -> R.id.chip_manual_cd_30s
             60L -> R.id.chip_manual_cd_1m
             300L -> R.id.chip_manual_cd_5m
@@ -372,15 +375,8 @@ class ManualReplyConfigurationActivity : BaseActivity() {
         }
         tvAppsError.visibility = View.GONE
 
-        val rawCooldown = etCooldownSeconds.text?.toString()?.trim()?.toLongOrNull() ?: MIN_COOLDOWN_SECONDS
-        val effectiveCooldown = rawCooldown.coerceAtLeast(MIN_COOLDOWN_SECONDS)
-        if (rawCooldown < MIN_COOLDOWN_SECONDS) {
-            isPopulating = true
-            etCooldownSeconds.setText(effectiveCooldown.toString())
-            syncCooldownPresetChip(effectiveCooldown)
-            isPopulating = false
-            Toast.makeText(this, R.string.manual_cooldown_min_adjusted_toast, Toast.LENGTH_SHORT).show()
-        }
+        val effectiveCooldown = (etCooldownSeconds.text?.toString()?.trim()?.toLongOrNull() ?: 0L)
+            .coerceIn(MIN_COOLDOWN_SECONDS, MAX_COOLDOWN_SECONDS)
 
         val groupReplyEnabled = chipGroupConversationType.checkedChipId == R.id.chip_manual_conv_both
         val contactFilterEnabled = switchContactFilter.isChecked

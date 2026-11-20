@@ -260,7 +260,7 @@
                             android:layout_height="wrap_content"
                             android:inputType="number"
                             android:maxLines="1"
-                            android:text="10" />
+                            android:text="0" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.chip.ChipGroup
@@ -271,11 +271,18 @@
                         app:singleSelection="true">
 
                         <com.google.android.material.chip.Chip
-                            android:id="@+id/chip_manual_cd_min"
+                            android:id="@+id/chip_manual_cd_off"
                             style="@style/Widget.Material3.Chip.Filter"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="@string/manual_cooldown_min" />
+                            android:text="@string/manual_cooldown_off" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chip_manual_cd_10s"
+                            style="@style/Widget.Material3.Chip.Filter"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/manual_cooldown_10s" />
 
                         <com.google.android.material.chip.Chip
                             android:id="@+id/chip_manual_cd_30s"

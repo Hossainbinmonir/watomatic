@@ -31,6 +31,7 @@ android {
             isIncludeAndroidResources = true
             all {
                 it.maxHeapSize = "2048m"
+                it.forkEvery = 8
             }
         }
     }

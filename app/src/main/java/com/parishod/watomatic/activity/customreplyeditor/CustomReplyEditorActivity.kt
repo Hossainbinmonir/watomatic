@@ -158,8 +158,12 @@ class CustomReplyEditorActivity : BaseActivity() {
                 R.string.manual_card_summary_direct
             }
         )
-        val cooldownSec = maxOf(prefs.autoReplyDelay / 1000L, 10L)
-        val cooldownLabel = formatCooldownCompact(cooldownSec)
+        val cooldownSec = maxOf(prefs.autoReplyDelay / 1000L, 0L)
+        val cooldownSummary = if (cooldownSec == 0L) {
+            getString(R.string.manual_card_summary_no_cooldown)
+        } else {
+            getString(R.string.manual_card_summary_cooldown, formatCooldownCompact(cooldownSec))
+        }
         val contactsLabel = getString(
             if (prefs.isContactReplyEnabled) {
                 R.string.manual_card_summary_contacts_filtered
@@ -172,7 +176,7 @@ class CustomReplyEditorActivity : BaseActivity() {
             R.string.manual_card_rules_summary,
             appsCount,
             convLabel,
-            cooldownLabel,
+            cooldownSummary,
             contactsLabel
         )
     }

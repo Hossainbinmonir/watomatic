@@ -17,9 +17,6 @@ import static java.lang.Math.max;
  */
 public class NotificationReplyDecider {
 
-    // Do not reply to consecutive notifications from same person/group within this window
-    private static final int MIN_DELAY_BETWEEN_REPLIES_MS = 10 * 1000;
-
     private final PreferencesManager preferencesManager;
     private final DbUtils dbUtils;
     private final ContactsHelper contactsHelper;
@@ -82,9 +79,12 @@ public class NotificationReplyDecider {
         if (title != null && title.equalsIgnoreCase(selfDisplayName)) {
             return false;
         }
-        long timeDelay = preferencesManager.getAutoReplyDelay();
+        long timeDelay = max(0L, preferencesManager.getAutoReplyDelay());
+        if (timeDelay == 0L) {
+            return true;
+        }
         return (System.currentTimeMillis() - dbUtils.getLastRepliedTime(sbn.getPackageName(), title)
-                >= max(timeDelay, MIN_DELAY_BETWEEN_REPLIES_MS));
+                >= timeDelay);
     }
 
     boolean isGroupMessageAndReplyAllowed(StatusBarNotification sbn) {

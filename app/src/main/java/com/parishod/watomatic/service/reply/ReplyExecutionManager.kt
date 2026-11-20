@@ -54,6 +54,7 @@ class ReplyExecutionManager @JvmOverloads constructor(
 
     private val appContext: Context = context.applicationContext
     private val inFlightKeys = ConcurrentHashMap<String, String>()
+    private val shutdownLock = Any()
     private val shutDown = AtomicBoolean(false)
 
     @JvmOverloads
@@ -62,25 +63,31 @@ class ReplyExecutionManager @JvmOverloads constructor(
         notificationWear: NotificationWear?,
         transitionListener: StatusTransitionListener? = null
     ): ReplyExecutionResult {
-        var currentAttempt = if (attempt.status == ReplyExecutionStatus.GENERATED) {
-            attempt
-        } else {
-            attempt.transitionTo(ReplyExecutionStatus.GENERATED, clock())
-        }
-        notifyTransition(transitionListener, currentAttempt)
-
-        if (shutDown.get()) {
-            currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.CANCELLED, clock())
-            notifyTransition(transitionListener, currentAttempt)
+        if (attempt.status != ReplyExecutionStatus.GENERATED) {
+            val failureCategory = when (attempt.status) {
+                ReplyExecutionStatus.UNKNOWN -> FAILURE_UNKNOWN_OUTCOME_LOCKED
+                ReplyExecutionStatus.DISPATCHING -> FAILURE_CONCURRENT_IN_FLIGHT
+                ReplyExecutionStatus.DISPATCHED,
+                ReplyExecutionStatus.FAILED,
+                ReplyExecutionStatus.CANCELLED,
+                ReplyExecutionStatus.GENERATED -> FAILURE_INVALID_ATTEMPT_STATE
+            }
             return ReplyExecutionResult(
-                executionId = currentAttempt.attemptId,
-                status = ReplyExecutionStatus.CANCELLED,
+                executionId = attempt.attemptId,
+                status = ReplyExecutionStatus.FAILED,
                 dispatchAttempted = false,
                 dispatchedNormally = false,
-                failureCategory = FAILURE_SERVICE_SHUTDOWN,
-                diagnosticMessage = "Execution cancelled before dispatch: manager shut down",
-                timestampMs = currentAttempt.updatedAtMs
+                failureCategory = failureCategory,
+                diagnosticMessage = "Cannot execute attempt in ${attempt.status} state",
+                timestampMs = clock()
             )
+        }
+
+        var currentAttempt = attempt
+        notifyTransition(transitionListener, currentAttempt)
+
+        if (isShutDown()) {
+            return cancelForShutdown(currentAttempt, transitionListener)
         }
 
         if (currentAttempt.replyText == null) {
@@ -143,8 +150,20 @@ class ReplyExecutionManager @JvmOverloads constructor(
         }
 
         val lockKey = resolveCoordinationKey(currentAttempt, notificationWear)
-        val existingOwner = inFlightKeys.putIfAbsent(lockKey, currentAttempt.attemptId)
-        if (existingOwner != null) {
+        val ownerToken = currentAttempt.attemptId
+        var shutDownBeforeLock = false
+        var lockAcquired = false
+        synchronized(shutdownLock) {
+            if (shutDown.get()) {
+                shutDownBeforeLock = true
+            } else {
+                lockAcquired = inFlightKeys.putIfAbsent(lockKey, ownerToken) == null
+            }
+        }
+        if (shutDownBeforeLock) {
+            return cancelForShutdown(currentAttempt, transitionListener)
+        }
+        if (!lockAcquired) {
             currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.CANCELLED, clock())
             notifyTransition(transitionListener, currentAttempt)
             return ReplyExecutionResult(
@@ -159,18 +178,8 @@ class ReplyExecutionManager @JvmOverloads constructor(
         }
 
         try {
-            if (shutDown.get()) {
-                currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.CANCELLED, clock())
-                notifyTransition(transitionListener, currentAttempt)
-                return ReplyExecutionResult(
-                    executionId = currentAttempt.attemptId,
-                    status = ReplyExecutionStatus.CANCELLED,
-                    dispatchAttempted = false,
-                    dispatchedNormally = false,
-                    failureCategory = FAILURE_SERVICE_SHUTDOWN,
-                    diagnosticMessage = "Execution cancelled before dispatch: manager shut down",
-                    timestampMs = currentAttempt.updatedAtMs
-                )
+            if (isShutDown()) {
+                return cancelForShutdown(currentAttempt, transitionListener)
             }
 
             val localIntent = Intent().apply {
@@ -200,8 +209,18 @@ class ReplyExecutionManager @JvmOverloads constructor(
                 }
             }
 
+            // Coordinate shutdown and dispatch-start atomically without holding a global
+            // lock across transition listeners or PendingIntent.send().
+            if (isShutDown()) {
+                return cancelForShutdown(currentAttempt, transitionListener)
+            }
+
             currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.DISPATCHING, clock())
             notifyTransition(transitionListener, currentAttempt)
+
+            if (isShutDown()) {
+                return cancelForShutdown(currentAttempt, transitionListener)
+            }
 
             // Isolate PendingIntent dispatch from transition listener callbacks so listener
             // exceptions can never corrupt or reclassify the authoritative dispatch outcome.
@@ -287,15 +306,34 @@ class ReplyExecutionManager @JvmOverloads constructor(
                 }
             }
         } finally {
-            inFlightKeys.remove(lockKey, currentAttempt.attemptId)
+            inFlightKeys.remove(lockKey, ownerToken)
         }
     }
 
     fun shutdown() {
-        shutDown.set(true)
+        synchronized(shutdownLock) {
+            shutDown.set(true)
+        }
     }
 
-    fun isShutDown(): Boolean = shutDown.get()
+    fun isShutDown(): Boolean = synchronized(shutdownLock) { shutDown.get() }
+
+    private fun cancelForShutdown(
+        attempt: ReplyAttempt,
+        transitionListener: StatusTransitionListener?
+    ): ReplyExecutionResult {
+        val cancelled = attempt.transitionTo(ReplyExecutionStatus.CANCELLED, clock())
+        notifyTransition(transitionListener, cancelled)
+        return ReplyExecutionResult(
+            executionId = cancelled.attemptId,
+            status = ReplyExecutionStatus.CANCELLED,
+            dispatchAttempted = false,
+            dispatchedNormally = false,
+            failureCategory = FAILURE_SERVICE_SHUTDOWN,
+            diagnosticMessage = "Execution cancelled before dispatch: manager shut down",
+            timestampMs = cancelled.updatedAtMs
+        )
+    }
 
     internal fun activeInFlightCount(): Int = inFlightKeys.size
 
@@ -343,5 +381,6 @@ class ReplyExecutionManager @JvmOverloads constructor(
         const val FAILURE_GENERATED_INTERRUPTED = "GENERATED_INTERRUPTED"
         const val FAILURE_DISPATCHING_INTERRUPTED = "DISPATCHING_INTERRUPTED"
         const val FAILURE_CLAIM_PERSISTENCE_ERROR = "CLAIM_PERSISTENCE_ERROR"
+        const val FAILURE_INVALID_ATTEMPT_STATE = "INVALID_ATTEMPT_STATE"
     }
 }

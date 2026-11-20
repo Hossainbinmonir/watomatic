@@ -85,7 +85,8 @@ data class ReplyAttemptEntity(
             "UNKNOWN_OUTCOME_LOCKED",
             "GENERATED_INTERRUPTED",
             "DISPATCHING_INTERRUPTED",
-            "CLAIM_PERSISTENCE_ERROR"
+            "CLAIM_PERSISTENCE_ERROR",
+            "INVALID_ATTEMPT_STATE"
         )
 
         @JvmStatic

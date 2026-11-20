@@ -506,14 +506,14 @@
     <string name="manual_reply_rules_section_title">Default Manual Reply Rules</string>
     <string name="manual_reply_rules_section_subtitle">Control cooldown, conversation type, contacts, and apps — no keywords required.</string>
     <string name="manual_cooldown_label">Reply Cooldown (seconds)</string>
-    <string name="manual_cooldown_helper">Minimum wait before replying to the same person or group again (system minimum: 10s)</string>
-    <string name="manual_cooldown_min">10s (Min)</string>
+    <string name="manual_cooldown_helper">Minimum wait before replying to the same person or group again (0 = no cooldown)</string>
+    <string name="manual_cooldown_off">Off</string>
+    <string name="manual_cooldown_10s">10s</string>
     <string name="manual_cooldown_30s">30s</string>
     <string name="manual_cooldown_1m">1m</string>
     <string name="manual_cooldown_5m">5m</string>
     <string name="manual_cooldown_30m">30m</string>
     <string name="manual_cooldown_1h">1h</string>
-    <string name="manual_cooldown_min_adjusted_toast">System minimum cooldown is 10 seconds</string>
     <string name="manual_conv_type_label">Conversation Type</string>
     <string name="manual_conv_direct_only">Direct Only</string>
     <string name="manual_conv_direct_and_groups">Direct &amp; Groups</string>
@@ -529,7 +529,9 @@
     <string name="manual_rules_open_dashboard_btn">Open Rules</string>
     <string name="manual_save_config_btn">Save Reply &amp; Rules</string>
     <string name="manual_config_saved_toast">Default manual reply &amp; rules saved</string>
-    <string name="manual_card_rules_summary">%1$d apps • %2$s • %3$s cooldown • %4$s</string>
+    <string name="manual_card_rules_summary">%1$d apps • %2$s • %3$s • %4$s</string>
+    <string name="manual_card_summary_no_cooldown">No cooldown</string>
+    <string name="manual_card_summary_cooldown">%1$s cooldown</string>
     <string name="manual_card_summary_direct">Direct only</string>
     <string name="manual_card_summary_groups">Direct &amp; groups</string>
     <string name="manual_card_summary_contacts_filtered">Contacts filtered</string>

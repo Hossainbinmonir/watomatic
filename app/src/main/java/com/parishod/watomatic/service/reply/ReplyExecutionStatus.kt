@@ -35,5 +35,8 @@ enum class ReplyExecutionStatus {
      * Dispatch outcome cannot be determined reliably (for example, an unexpected exception
      * after invoking `PendingIntent.send()`). Never treated as success and never automatically retried.
      */
-    UNKNOWN
+    UNKNOWN;
+
+    fun isTerminal(): Boolean =
+        this == DISPATCHED || this == FAILED || this == CANCELLED || this == UNKNOWN
 }

@@ -33,6 +33,10 @@ data class ReplyAttempt(
         timestampMs: Long = System.currentTimeMillis()
     ): ReplyAttempt = copy(status = newStatus, updatedAtMs = timestampMs)
 
+    fun isExecutable(): Boolean = status == ReplyExecutionStatus.GENERATED
+
+    fun isTerminal(): Boolean = status.isTerminal()
+
     companion object {
         @JvmStatic
         @JvmOverloads

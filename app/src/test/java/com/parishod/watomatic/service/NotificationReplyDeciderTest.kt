@@ -255,21 +255,29 @@ class NotificationReplyDeciderTest {
     // ========== canSendReplyNow tests ==========
 
     @Test
-    fun `canSendReplyNow returns false within minimum cooldown`() {
+    fun `canSendReplyNow returns true immediately when cooldown is zero`() {
         whenever(prefs.getAutoReplyDelay()).thenReturn(0L)
-        // Last replied 5 seconds ago (within 10s min delay)
+        // Even if last reply was 5 seconds ago, 0s cooldown allows replying immediately
         whenever(dbUtils.getLastRepliedTime(eq("com.whatsapp"), eq("John")))
             .thenReturn(System.currentTimeMillis() - 5000)
+        val sbn = buildMockSbn()
+        assertTrue(decider.canSendReplyNow(sbn))
+    }
+
+    @Test
+    fun `canSendReplyNow returns false when sub-10s custom cooldown has not elapsed`() {
+        whenever(prefs.getAutoReplyDelay()).thenReturn(5000L) // 5s custom cooldown
+        whenever(dbUtils.getLastRepliedTime(eq("com.whatsapp"), eq("John")))
+            .thenReturn(System.currentTimeMillis() - 2000)
         val sbn = buildMockSbn()
         assertFalse(decider.canSendReplyNow(sbn))
     }
 
     @Test
-    fun `canSendReplyNow returns true after cooldown elapsed`() {
-        whenever(prefs.getAutoReplyDelay()).thenReturn(0L)
-        // Last replied 15 seconds ago (beyond 10s min delay)
+    fun `canSendReplyNow returns true after sub-10s custom cooldown elapsed`() {
+        whenever(prefs.getAutoReplyDelay()).thenReturn(5000L) // 5s custom cooldown
         whenever(dbUtils.getLastRepliedTime(eq("com.whatsapp"), eq("John")))
-            .thenReturn(System.currentTimeMillis() - 15000)
+            .thenReturn(System.currentTimeMillis() - 6000)
         val sbn = buildMockSbn()
         assertTrue(decider.canSendReplyNow(sbn))
     }

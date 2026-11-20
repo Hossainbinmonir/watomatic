@@ -174,13 +174,17 @@ class CustomReplyEditorRulesNavigationTest {
     }
 
     @Test
-    fun `ManualReplyConfigurationActivity enforces 10s system minimum cooldown and launches ContactSelectorActivity`() {
+    fun `ManualReplyConfigurationActivity allows 0s and sub-10s cooldown and launches ContactSelectorActivity`() {
         PreferencesManager.getPreferencesInstance(context).saveEnabledApps("com.whatsapp", true)
         val controller = Robolectric.buildActivity(ManualReplyConfigurationActivity::class.java)
         val activity = controller.get()
         activity.setTheme(R.style.Theme_WaReply)
         controller.create().start().resume()
         shadowOf(Looper.getMainLooper()).idle()
+
+        // Default starts at 0 seconds with Off chip selected
+        assertEquals("0", activity.findViewById<TextInputEditText>(R.id.et_manual_cooldown_seconds).text.toString())
+        assertTrue(activity.findViewById<Chip>(R.id.chip_manual_cd_off).isChecked)
 
         activity.findViewById<MaterialSwitch>(R.id.switch_manual_contact_filter).isChecked = true
         activity.findViewById<View>(R.id.btn_choose_manual_contacts).performClick()
@@ -192,6 +196,7 @@ class CustomReplyEditorRulesNavigationTest {
         assertEquals(ContactSelectorActivity::class.java.name, contactsIntent?.component?.className)
         assertTrue(PreferencesManager.getPreferencesInstance(context).isContactReplyEnabled)
 
+        // Sub-10s cooldown (2 seconds) is saved directly without clamping to 10s
         activity.findViewById<TextInputEditText>(R.id.et_default_manual_reply)
             .setText("Busy right now.")
         activity.findViewById<TextInputEditText>(R.id.et_manual_cooldown_seconds)
@@ -199,7 +204,30 @@ class CustomReplyEditorRulesNavigationTest {
         activity.findViewById<View>(R.id.btn_save_manual_config).performClick()
         shadowOf(Looper.getMainLooper()).idle()
 
-        assertEquals(10_000L, PreferencesManager.getPreferencesInstance(context).autoReplyDelay)
+        assertEquals(2_000L, PreferencesManager.getPreferencesInstance(context).autoReplyDelay)
+
+        // Off chip resets to 0s and shows "No cooldown" in CustomReplyEditorActivity
+        val controller2 = Robolectric.buildActivity(ManualReplyConfigurationActivity::class.java)
+        val activity2 = controller2.get()
+        activity2.setTheme(R.style.Theme_WaReply)
+        controller2.create().start().resume()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        activity2.findViewById<Chip>(R.id.chip_manual_cd_off).performClick()
+        activity2.findViewById<View>(R.id.btn_save_manual_config).performClick()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(0L, PreferencesManager.getPreferencesInstance(context).autoReplyDelay)
+
+        val editorController = Robolectric.buildActivity(CustomReplyEditorActivity::class.java)
+        val editorActivity = editorController.get()
+        editorActivity.setTheme(R.style.Theme_WaReply)
+        editorController.create().start().resume()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val statusText = editorActivity.findViewById<TextView>(R.id.manual_status_text).text.toString()
+        assertTrue(statusText.contains("No cooldown"))
+        editorController.pause().stop().destroy()
     }
 
     @Test

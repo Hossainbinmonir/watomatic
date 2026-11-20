@@ -176,6 +176,7 @@ class NotificationReplyDeciderInstrumentedTest {
     fun recentReplyInDb_cooldownBlocksReply() {
         prefs.setServicePref(true)
         prefs.saveEnabledApps("com.whatsapp", true)
+        prefs.setAutoReplyDelay(10 * 1000L)
 
         val appPackage = AppPackage("com.whatsapp")
         db.appPackageDao().insertAppPackage(appPackage)
