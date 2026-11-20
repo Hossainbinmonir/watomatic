@@ -29,6 +29,9 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            all {
+                it.maxHeapSize = "2048m"
+            }
         }
     }
 
@@ -144,7 +147,7 @@ tasks.register<JacocoCoverageVerification>("jacocoCoverageVerification") {
 
     classDirectories.setFrom(files(javaClasses, kotlinClasses))
     executionData.setFrom(
-        fileTree(layout.buildDirectory.get()) {
+        fileTree(layout.buildDirectory.dir("outputs/unit_test_code_coverage/debugUnitTest")) {
             include("**/*.exec", "**/*.ec")
         }
     )
@@ -192,7 +195,7 @@ tasks.register<JacocoReport>("jacocoUnitTestReport") {
     sourceDirectories.setFrom(files("src/main/java", "src/main/kotlin"))
     classDirectories.setFrom(files(javaClasses, kotlinClasses))
     executionData.setFrom(
-        fileTree(layout.buildDirectory.get()) {
+        fileTree(layout.buildDirectory.dir("outputs/unit_test_code_coverage/debugUnitTest")) {
             include("**/*.exec", "**/*.ec")
         }
     )

@@ -182,11 +182,15 @@ class CustomReplyEditorRulesNavigationTest {
         activity.setTheme(R.style.Theme_WaReply)
         controller.create().start().resume()
 
-        // Allow Flow emission on IO/Main dispatchers to populate the list
-        Thread.sleep(150)
-        shadowOf(Looper.getMainLooper()).idle()
-
         val listContainer = activity.findViewById<LinearLayout>(R.id.manual_rules_list_container)
+        val deadline = System.currentTimeMillis() + 5000L
+        while (listContainer.childCount == 0 && System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            if (listContainer.childCount == 0) {
+                Thread.sleep(25)
+            }
+        }
+        shadowOf(Looper.getMainLooper()).idle()
         assertEquals(1, listContainer.childCount)
         val firstCard = listContainer.getChildAt(0)
         assertEquals("Price List", firstCard.findViewById<TextView>(R.id.tv_compact_rule_name).text.toString())
