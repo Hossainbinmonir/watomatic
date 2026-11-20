@@ -96,6 +96,26 @@ class RuleDashboardActivity : BaseActivity(), RuleListAdapter.RuleActionListener
             viewModel.setFilterTab(tab)
         }
 
+        val initialReplyType = intent.getStringExtra(EXTRA_REPLY_TYPE_FILTER)
+            ?.let { runCatching { RuleReplyTypeFilter.valueOf(it) }.getOrNull() }
+            ?: RuleReplyTypeFilter.ALL
+        when (initialReplyType) {
+            RuleReplyTypeFilter.MANUAL -> binding.chipTypeManual.isChecked = true
+            RuleReplyTypeFilter.AI -> binding.chipTypeAi.isChecked = true
+            RuleReplyTypeFilter.ALL -> binding.chipTypeAll.isChecked = true
+        }
+        viewModel.setReplyTypeFilter(initialReplyType)
+
+        binding.chipGroupReplyTypeFilter.setOnCheckedStateChangeListener { _, checkedIds ->
+            val selectedId = checkedIds.firstOrNull() ?: R.id.chip_type_all
+            val filter = when (selectedId) {
+                R.id.chip_type_manual -> RuleReplyTypeFilter.MANUAL
+                R.id.chip_type_ai -> RuleReplyTypeFilter.AI
+                else -> RuleReplyTypeFilter.ALL
+            }
+            viewModel.setReplyTypeFilter(filter)
+        }
+
         binding.chipGroupCategoryFilter.setOnCheckedStateChangeListener { group, checkedIds ->
             if (isUpdatingCategoryChips) return@setOnCheckedStateChangeListener
             val checkedId = checkedIds.firstOrNull()
@@ -226,7 +246,12 @@ class RuleDashboardActivity : BaseActivity(), RuleListAdapter.RuleActionListener
     }
 
     private fun openCreateRule() {
-        startActivity(Intent(this, CreateEditRuleActivity::class.java))
+        val intent = Intent(this, CreateEditRuleActivity::class.java).apply {
+            if (viewModel.uiState.value.replyTypeFilter == RuleReplyTypeFilter.MANUAL) {
+                putExtra(CreateEditRuleActivity.EXTRA_MANUAL_RULE_ONLY, true)
+            }
+        }
+        startActivity(intent)
     }
 
     override fun onToggleEnabled(rule: AutoReplyRule, enabled: Boolean) {
@@ -259,5 +284,9 @@ class RuleDashboardActivity : BaseActivity(), RuleListAdapter.RuleActionListener
 
     override fun onAdjustPriority(rule: AutoReplyRule, delta: Int) {
         viewModel.adjustPriority(rule, delta)
+    }
+
+    companion object {
+        const val EXTRA_REPLY_TYPE_FILTER = "extra_reply_type_filter"
     }
 }

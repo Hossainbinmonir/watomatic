@@ -20,12 +20,19 @@ enum class RuleFilterTab {
     INACTIVE
 }
 
+enum class RuleReplyTypeFilter {
+    ALL,
+    MANUAL,
+    AI
+}
+
 data class RuleDashboardUiState(
     val totalRules: Int = 0,
     val activeRules: Int = 0,
     val inactiveRules: Int = 0,
     val displayedRules: List<AutoReplyRule> = emptyList(),
     val filterTab: RuleFilterTab = RuleFilterTab.ALL,
+    val replyTypeFilter: RuleReplyTypeFilter = RuleReplyTypeFilter.ALL,
     val searchQuery: String = "",
     val availableCategories: List<String> = emptyList(),
     val selectedCategory: String? = null,
@@ -39,15 +46,17 @@ class RuleDashboardViewModel(application: Application) : AndroidViewModel(applic
     }
 
     private val filterTab = MutableStateFlow(RuleFilterTab.ALL)
+    private val replyTypeFilter = MutableStateFlow(RuleReplyTypeFilter.ALL)
     private val searchQuery = MutableStateFlow("")
     private val selectedCategory = MutableStateFlow<String?>(null)
 
     val uiState: StateFlow<RuleDashboardUiState> = combine(
         repository.allRules,
         filterTab,
+        replyTypeFilter,
         searchQuery,
         selectedCategory
-    ) { allRules, tab, query, category ->
+    ) { allRules, tab, replyType, query, category ->
         val activeCount = allRules.count { it.isEnabled }
         val inactiveCount = allRules.size - activeCount
 
@@ -67,10 +76,16 @@ class RuleDashboardViewModel(application: Application) : AndroidViewModel(applic
             RuleFilterTab.INACTIVE -> allRules.filter { !it.isEnabled }
         }
 
+        val typeFiltered = when (replyType) {
+            RuleReplyTypeFilter.ALL -> tabFiltered
+            RuleReplyTypeFilter.MANUAL -> tabFiltered.filter { !it.useAiReply }
+            RuleReplyTypeFilter.AI -> tabFiltered.filter { it.useAiReply }
+        }
+
         val categoryFiltered = if (effectiveCategory == null) {
-            tabFiltered
+            typeFiltered
         } else {
-            tabFiltered.filter { it.category.trim().equals(effectiveCategory, ignoreCase = true) }
+            typeFiltered.filter { it.category.trim().equals(effectiveCategory, ignoreCase = true) }
         }
 
         val trimmedQuery = query.trim()
@@ -95,6 +110,7 @@ class RuleDashboardViewModel(application: Application) : AndroidViewModel(applic
             inactiveRules = inactiveCount,
             displayedRules = finalFiltered,
             filterTab = tab,
+            replyTypeFilter = replyType,
             searchQuery = query,
             availableCategories = categories,
             selectedCategory = effectiveCategory,
@@ -108,6 +124,10 @@ class RuleDashboardViewModel(application: Application) : AndroidViewModel(applic
 
     fun setFilterTab(tab: RuleFilterTab) {
         filterTab.value = tab
+    }
+
+    fun setReplyTypeFilter(filter: RuleReplyTypeFilter) {
+        replyTypeFilter.value = filter
     }
 
     fun setSearchQuery(query: String) {

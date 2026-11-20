@@ -78,6 +78,13 @@
             android:parentActivityName=".activity.main.MainActivity" />
 
         <activity
+            android:name=".activity.customreplyeditor.ManualReplyConfigurationActivity"
+            android:exported="false"
+            android:label="@string/manual_reply_settings_title"
+            android:parentActivityName=".activity.customreplyeditor.CustomReplyEditorActivity"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
             android:name=".activity.customreplyeditor.OtherAiConfigurationActivity"
             android:exported="false"
             android:label="AI Configuration"

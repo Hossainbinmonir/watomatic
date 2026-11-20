@@ -424,6 +424,7 @@
                         android:textSize="14sp" />
 
                     <LinearLayout
+                        android:id="@+id/layout_use_ai_toggle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="10dp"

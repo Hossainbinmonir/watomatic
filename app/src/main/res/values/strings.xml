@@ -497,6 +497,28 @@
     <string name="rule_fallback_toggle_title">Fallback to Global Reply</string>
     <string name="rule_fallback_toggle_desc">Send default/AI reply when no enabled rule matches</string>
     <string name="rule_listener_warning">Notification Access is disabled. Enable Auto Reply on the home screen for rules to respond automatically.</string>
+    <string name="global_reply_rules_title">Rules</string>
+    <string name="global_reply_rules_subtitle">Create and manage custom auto-reply rules.</string>
+    <string name="manual_reply_settings_title">Manual Reply Settings</string>
+    <string name="manual_reply_default_section_title">Default Manual Reply</string>
+    <string name="manual_reply_default_section_subtitle">Sent automatically when Manual Replies is active and no separate manual rule matches.</string>
+    <string name="manual_reply_save_message_btn">Save Default Reply</string>
+    <string name="manual_reply_message_saved_toast">Default manual reply updated</string>
+    <string name="manual_reply_message_invalid_toast">Please enter a valid auto reply message</string>
+    <string name="manual_reply_rules_section_title">Manual Reply Rules</string>
+    <string name="manual_reply_rules_section_subtitle">Create separate keyword, app, contact, and schedule rules for Manual Replies.</string>
+    <string name="manual_reply_rules_count_summary">%1$d active • %2$d total</string>
+    <string name="manual_reply_create_rule_btn">Create Manual Rule</string>
+    <string name="manual_reply_manage_rules_btn">Manage Rules</string>
+    <string name="manual_reply_rules_empty_title">No Manual Reply Rules Yet</string>
+    <string name="manual_reply_rules_empty_subtitle">Create separate rules with custom keywords, contacts, apps, or schedules for Manual Replies.</string>
+    <string name="create_manual_rule_title">Create Manual Rule</string>
+    <string name="edit_manual_rule_title">Edit Manual Rule</string>
+    <string name="manual_card_summary_with_rules">%1$d active manual rule(s) • Tap gear to manage</string>
+    <string name="manual_card_summary_no_rules">Tap gear to edit reply or create separate rules</string>
+    <string name="filter_type_all">All Types</string>
+    <string name="filter_type_manual">Manual Only</string>
+    <string name="filter_type_ai">AI Only</string>
 
     <!-- Create / Edit Rule Sections -->
     <string name="section_basic_info">Basic Information</string>

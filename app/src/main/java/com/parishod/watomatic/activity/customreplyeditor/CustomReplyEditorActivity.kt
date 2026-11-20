@@ -25,6 +25,7 @@ import com.parishod.watomatic.model.utils.ReportCopyHelper
 import com.parishod.watomatic.model.CustomRepliesData
 import com.parishod.watomatic.model.ai.AiMemoryDatabase
 import com.parishod.watomatic.model.preferences.PreferencesManager
+import com.parishod.watomatic.model.rules.AutoReplyRulesDatabase
 import com.parishod.watomatic.utils.UnsavedChangesDialog
 import com.parishod.watomatic.viewmodel.SwipeToKillAppDetectViewModel
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +43,7 @@ class CustomReplyEditorActivity : BaseActivity() {
     private var customRepliesData: CustomRepliesData? = null
     private var preferencesManager: PreferencesManager? = null
     private var manualRepliesCard: MaterialCardView? = null
+    private var manualStatusText: TextView? = null
     private var manualSettingsIcon: android.widget.ImageView? = null
     private var manualCheckIcon: android.widget.ImageView? = null
     private var otherAiProviderCard: MaterialCardView? = null
@@ -54,6 +56,11 @@ class CustomReplyEditorActivity : BaseActivity() {
 
     private var selectedReplyMethod = REPLY_METHOD_MANUAL
     private var initialSelectedReplyMethod = REPLY_METHOD_MANUAL
+
+    private val manualConfigLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        autoReplyText?.setText(customRepliesData?.get() ?: "")
+        refreshManualRulesSummary()
+    }
 
     private val otherAiConfigLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) {
@@ -139,6 +146,24 @@ class CustomReplyEditorActivity : BaseActivity() {
         super.onResume()
         updateCardExpansionState(selectedReplyMethod)
         refreshPendingNotesBadge()
+        refreshManualRulesSummary()
+    }
+
+    private fun refreshManualRulesSummary() {
+        lifecycleScope.launch {
+            val activeManualCount = withContext(Dispatchers.IO) {
+                AutoReplyRulesDatabase.getInstance(applicationContext)
+                    .ruleDao()
+                    .getAllRulesOnce()
+                    .count { !it.useAiReply && it.isEnabled }
+            }
+            manualStatusText?.visibility = android.view.View.VISIBLE
+            manualStatusText?.text = if (activeManualCount > 0) {
+                getString(R.string.manual_card_summary_with_rules, activeManualCount)
+            } else {
+                getString(R.string.manual_card_summary_no_rules)
+            }
+        }
     }
 
     private fun refreshPendingNotesBadge() {
@@ -154,6 +179,7 @@ class CustomReplyEditorActivity : BaseActivity() {
         autoReplyText = findViewById(R.id.autoReplyTextInputEditText)
         saveAutoReplyTextBtn = findViewById(R.id.saveCustomReplyBtn)
         manualRepliesCard = findViewById(R.id.manual_replies_card)
+        manualStatusText = findViewById(R.id.manual_status_text)
         manualSettingsIcon = findViewById(R.id.manual_settings_icon)
         manualCheckIcon = findViewById(R.id.manual_check_icon)
         otherAiProviderCard = findViewById(R.id.other_ai_provider_card)
@@ -185,9 +211,10 @@ class CustomReplyEditorActivity : BaseActivity() {
             selectReplyMethod(REPLY_METHOD_MANUAL)
         }
 
-        // Manual Settings Icon - Edit manual reply
+        // Manual Settings Icon - Open Manual Reply Settings (separate rules & default reply)
         manualSettingsIcon?.setOnClickListener {
-            showEditAutoReplyDialog()
+            val intent = Intent(this, ManualReplyConfigurationActivity::class.java)
+            manualConfigLauncher.launch(intent)
         }
 
         // Other AI Card - Select BYOK method
@@ -354,37 +381,6 @@ class CustomReplyEditorActivity : BaseActivity() {
         val typedValue = TypedValue()
         theme.resolveAttribute(attr, typedValue, true)
         return typedValue.data
-    }
-
-    private fun showEditAutoReplyDialog() {
-        val dialogView = layoutInflater.inflate(R.layout.dialog_edit_auto_reply, null)
-        val editText = dialogView.findViewById<TextInputEditText>(R.id.dialog_auto_reply_edit_text)
-
-        editText?.setText(customRepliesData?.get())
-
-        val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
-            .setTitle(getString(R.string.mainAutoReplyLabel))
-            .setView(dialogView)
-            .setPositiveButton(getString(R.string.save)) { _, _ ->
-                val newText = editText?.text
-                if (CustomRepliesData.isValidCustomReply(newText)) {
-                    customRepliesData?.set(newText)
-                    autoReplyText?.setText(newText)
-                    Toast.makeText(this, "Auto reply updated", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, "Invalid auto reply text", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton(getString(android.R.string.cancel), null)
-            .create()
-
-        dialog.show()
-
-        editText?.requestFocus()
-        editText?.postDelayed({
-            val imm = getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-            imm.showSoftInput(editText, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
-        }, 100)
     }
 
     private fun hasSelectionChanged(): Boolean {

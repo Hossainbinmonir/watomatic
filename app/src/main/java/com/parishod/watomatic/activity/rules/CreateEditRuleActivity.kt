@@ -50,6 +50,7 @@ class CreateEditRuleActivity : BaseActivity() {
     private lateinit var repository: RuleRepository
 
     private var editingRuleId: Long = -1L
+    private var isManualRuleOnly: Boolean = false
     private var existingRule: AutoReplyRule? = null
 
     private val selectedPackages = linkedSetOf<String>()
@@ -90,6 +91,7 @@ class CreateEditRuleActivity : BaseActivity() {
         }
 
         editingRuleId = intent.getLongExtra(EXTRA_RULE_ID, -1L)
+        isManualRuleOnly = intent.getBooleanExtra(EXTRA_MANUAL_RULE_ONLY, false)
 
         setupToolbar()
         setupCategorySection()
@@ -116,9 +118,13 @@ class CreateEditRuleActivity : BaseActivity() {
     private fun setupToolbar() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
-        supportActionBar?.title = getString(
-            if (editingRuleId > 0L) R.string.edit_rule_title else R.string.create_rule_title
-        )
+        val titleRes = when {
+            isManualRuleOnly && editingRuleId > 0L -> R.string.edit_manual_rule_title
+            isManualRuleOnly -> R.string.create_manual_rule_title
+            editingRuleId > 0L -> R.string.edit_rule_title
+            else -> R.string.create_rule_title
+        }
+        supportActionBar?.title = getString(titleRes)
         binding.toolbar.setNavigationOnClickListener {
             onBackPressedDispatcher.onBackPressed()
         }
@@ -358,6 +364,12 @@ class CreateEditRuleActivity : BaseActivity() {
     }
 
     private fun setupReplyMessageSection() {
+        if (isManualRuleOnly) {
+            binding.layoutUseAiToggle.visibility = View.GONE
+            binding.switchUseAiReply.isChecked = false
+        } else {
+            binding.layoutUseAiToggle.visibility = View.VISIBLE
+        }
         binding.switchUseAiReply.setOnCheckedChangeListener { _, isChecked ->
             updateReplyMessageHint(isChecked)
             if (isChecked) {
@@ -619,8 +631,9 @@ class CreateEditRuleActivity : BaseActivity() {
         keywords.addAll(rule.keywords)
         renderKeywordChips()
 
-        binding.switchUseAiReply.isChecked = rule.useAiReply
-        updateReplyMessageHint(rule.useAiReply)
+        val useAi = if (isManualRuleOnly) false else rule.useAiReply
+        binding.switchUseAiReply.isChecked = useAi
+        updateReplyMessageHint(useAi)
         binding.etReplyMessage.setText(rule.replyMessage)
         binding.etPriority.setText(rule.priority.toString())
         binding.etReplyDelay.setText(rule.replyDelaySeconds.toString())
@@ -845,5 +858,6 @@ class CreateEditRuleActivity : BaseActivity() {
 
     companion object {
         const val EXTRA_RULE_ID = "extra_rule_id"
+        const val EXTRA_MANUAL_RULE_ONLY = "extra_manual_rule_only"
     }
 }
