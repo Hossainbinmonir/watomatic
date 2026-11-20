@@ -25,7 +25,6 @@ import com.parishod.watomatic.model.utils.ReportCopyHelper
 import com.parishod.watomatic.model.CustomRepliesData
 import com.parishod.watomatic.model.ai.AiMemoryDatabase
 import com.parishod.watomatic.model.preferences.PreferencesManager
-import com.parishod.watomatic.model.rules.AutoReplyRulesDatabase
 import com.parishod.watomatic.utils.UnsavedChangesDialog
 import com.parishod.watomatic.viewmodel.SwipeToKillAppDetectViewModel
 import kotlinx.coroutines.Dispatchers
@@ -150,19 +149,39 @@ class CustomReplyEditorActivity : BaseActivity() {
     }
 
     private fun refreshManualRulesSummary() {
-        lifecycleScope.launch {
-            val activeManualCount = withContext(Dispatchers.IO) {
-                AutoReplyRulesDatabase.getInstance(applicationContext)
-                    .ruleDao()
-                    .getAllRulesOnce()
-                    .count { !it.useAiReply && it.isEnabled }
-            }
-            manualStatusText?.visibility = android.view.View.VISIBLE
-            manualStatusText?.text = if (activeManualCount > 0) {
-                getString(R.string.manual_card_summary_with_rules, activeManualCount)
+        val prefs = preferencesManager ?: return
+        val appsCount = prefs.enabledApps?.size ?: 0
+        val convLabel = getString(
+            if (prefs.isGroupReplyEnabled) {
+                R.string.manual_card_summary_groups
             } else {
-                getString(R.string.manual_card_summary_no_rules)
+                R.string.manual_card_summary_direct
             }
+        )
+        val cooldownSec = maxOf(prefs.autoReplyDelay / 1000L, 10L)
+        val cooldownLabel = formatCooldownCompact(cooldownSec)
+        val contactsLabel = getString(
+            if (prefs.isContactReplyEnabled) {
+                R.string.manual_card_summary_contacts_filtered
+            } else {
+                R.string.manual_card_summary_contacts_all
+            }
+        )
+        manualStatusText?.visibility = android.view.View.VISIBLE
+        manualStatusText?.text = getString(
+            R.string.manual_card_rules_summary,
+            appsCount,
+            convLabel,
+            cooldownLabel,
+            contactsLabel
+        )
+    }
+
+    private fun formatCooldownCompact(seconds: Long): String {
+        return when {
+            seconds % 3600L == 0L -> "${seconds / 3600L}h"
+            seconds % 60L == 0L -> "${seconds / 60L}m"
+            else -> "${seconds}s"
         }
     }
 

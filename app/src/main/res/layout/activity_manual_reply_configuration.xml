@@ -45,9 +45,59 @@
             android:paddingTop="12dp"
             android:paddingBottom="28dp">
 
-            <!-- 1. Separate Manual Reply Rules Card -->
+            <!-- Conditional Notice when Keyword Rules exist with Fallback disabled -->
             <com.google.android.material.card.MaterialCardView
-                android:id="@+id/card_manual_reply_rules"
+                android:id="@+id/card_rules_override_notice"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="14dp"
+                android:visibility="gone"
+                app:cardBackgroundColor="@color/badge_warning_bg"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp"
+                app:strokeColor="@color/rule_card_stroke"
+                app:strokeWidth="1dp"
+                tools:visibility="visible">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="14dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/inter_bold"
+                        android:text="@string/manual_rules_override_notice_title"
+                        android:textColor="@color/badge_warning_text"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:fontFamily="@font/noto_sans"
+                        android:text="@string/manual_rules_override_notice_desc"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_open_rules_fallback"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="8dp"
+                        android:fontFamily="@font/inter_medium"
+                        android:text="@string/manual_rules_open_dashboard_btn"
+                        android:textSize="13sp"
+                        app:cornerRadius="12dp" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- 1. Default Manual Reply Message Card -->
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/card_default_manual_reply"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="14dp"
@@ -78,8 +128,93 @@
                                 android:layout_width="22dp"
                                 android:layout_height="22dp"
                                 android:layout_gravity="center"
+                                android:contentDescription="@string/manual_reply_default_section_title"
+                                android:src="@drawable/ic_chat"
+                                app:tint="?attr/colorPrimary" />
+                        </FrameLayout>
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="12dp"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="@font/inter_bold"
+                                android:text="@string/manual_reply_default_section_title"
+                                android:textColor="@color/text_primary"
+                                android:textSize="16sp" />
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="2dp"
+                                android:fontFamily="@font/noto_sans"
+                                android:text="@string/manual_reply_default_section_subtitle"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="12sp" />
+                        </LinearLayout>
+                    </LinearLayout>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/til_default_manual_reply"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:hint="@string/mainAutoReplyTextPlaceholder"
+                        app:counterEnabled="true"
+                        app:counterMaxLength="500"
+                        app:endIconMode="clear_text">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/et_default_manual_reply"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="top|start"
+                            android:inputType="textMultiLine|textCapSentences"
+                            android:minLines="3" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- 2. Default Manual Reply Rules Card (No Keywords Required) -->
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/card_default_manual_rules"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/rule_card_bg"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp"
+                app:strokeColor="@color/rule_card_stroke"
+                app:strokeWidth="1dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <FrameLayout
+                            android:layout_width="40dp"
+                            android:layout_height="40dp"
+                            android:background="@drawable/bg_icon_circle_primary">
+
+                            <ImageView
+                                android:layout_width="22dp"
+                                android:layout_height="22dp"
+                                android:layout_gravity="center"
                                 android:contentDescription="@string/manual_reply_rules_section_title"
-                                android:src="@drawable/ic_rules"
+                                android:src="@drawable/ic_tune"
                                 app:tint="?attr/colorPrimary" />
                         </FrameLayout>
 
@@ -99,175 +234,263 @@
                                 android:textSize="16sp" />
 
                             <TextView
-                                android:id="@+id/tv_manual_rules_summary"
-                                android:layout_width="wrap_content"
+                                android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
                                 android:layout_marginTop="2dp"
-                                android:fontFamily="@font/inter_medium"
-                                android:textColor="?attr/colorPrimary"
-                                android:textSize="12sp"
-                                tools:text="2 active • 3 total" />
+                                android:fontFamily="@font/noto_sans"
+                                android:text="@string/manual_reply_rules_section_subtitle"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="12sp" />
                         </LinearLayout>
                     </LinearLayout>
 
-                    <TextView
+                    <!-- Rule 1: Reply Cooldown -->
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/til_manual_cooldown"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:fontFamily="@font/noto_sans"
-                        android:text="@string/manual_reply_rules_section_subtitle"
-                        android:textColor="@color/text_secondary"
-                        android:textSize="13sp" />
+                        android:layout_marginTop="16dp"
+                        android:hint="@string/manual_cooldown_label"
+                        app:helperText="@string/manual_cooldown_helper">
 
-                    <!-- Primary + Secondary Actions -->
-                    <LinearLayout
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/et_manual_cooldown_seconds"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="number"
+                            android:maxLines="1"
+                            android:text="10" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.chip.ChipGroup
+                        android:id="@+id/chip_group_manual_cooldown_presets"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="14dp"
-                        android:orientation="horizontal">
+                        android:layout_marginTop="6dp"
+                        app:singleSelection="true">
 
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btn_create_manual_rule"
-                            android:layout_width="0dp"
-                            android:layout_height="48dp"
-                            android:layout_marginEnd="6dp"
-                            android:layout_weight="1"
-                            android:fontFamily="@font/inter_bold"
-                            android:text="@string/manual_reply_create_rule_btn"
-                            android:textSize="13sp"
-                            app:cornerRadius="12dp"
-                            app:icon="@drawable/ic_baseline_add_24"
-                            app:iconSize="18dp" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btn_manage_manual_rules"
-                            style="@style/Widget.Material3.Button.OutlinedButton"
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chip_manual_cd_min"
+                            style="@style/Widget.Material3.Chip.Filter"
                             android:layout_width="wrap_content"
-                            android:layout_height="48dp"
-                            android:layout_marginStart="6dp"
-                            android:fontFamily="@font/inter_medium"
-                            android:text="@string/manual_reply_manage_rules_btn"
-                            android:textSize="13sp"
-                            app:cornerRadius="12dp"
-                            app:icon="@drawable/ic_tune"
-                            app:iconSize="18dp" />
-                    </LinearLayout>
+                            android:layout_height="wrap_content"
+                            android:text="@string/manual_cooldown_min" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chip_manual_cd_30s"
+                            style="@style/Widget.Material3.Chip.Filter"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/manual_cooldown_30s" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chip_manual_cd_1m"
+                            style="@style/Widget.Material3.Chip.Filter"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/manual_cooldown_1m" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chip_manual_cd_5m"
+                            style="@style/Widget.Material3.Chip.Filter"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/manual_cooldown_5m" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chip_manual_cd_30m"
+                            style="@style/Widget.Material3.Chip.Filter"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/manual_cooldown_30m" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chip_manual_cd_1h"
+                            style="@style/Widget.Material3.Chip.Filter"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/manual_cooldown_1h" />
+                    </com.google.android.material.chip.ChipGroup>
 
                     <View
                         android:layout_width="match_parent"
                         android:layout_height="1dp"
-                        android:layout_marginTop="14dp"
+                        android:layout_marginVertical="16dp"
                         android:background="@color/rule_card_stroke" />
 
-                    <!-- Empty State for Manual Rules -->
-                    <LinearLayout
-                        android:id="@+id/manual_rules_empty_state"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:gravity="center"
-                        android:orientation="vertical"
-                        android:paddingHorizontal="12dp"
-                        android:paddingTop="18dp"
-                        android:paddingBottom="8dp"
-                        android:visibility="gone"
-                        tools:visibility="visible">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:fontFamily="@font/inter_bold"
-                            android:gravity="center"
-                            android:text="@string/manual_reply_rules_empty_title"
-                            android:textColor="@color/text_primary"
-                            android:textSize="14sp" />
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="4dp"
-                            android:fontFamily="@font/noto_sans"
-                            android:gravity="center"
-                            android:text="@string/manual_reply_rules_empty_subtitle"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="12sp" />
-                    </LinearLayout>
-
-                    <!-- Live List of Manual Rules -->
-                    <LinearLayout
-                        android:id="@+id/manual_rules_list_container"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:orientation="vertical"
-                        android:visibility="gone" />
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- 2. Default Manual Reply Message Card -->
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/card_default_manual_reply"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                app:cardBackgroundColor="@color/rule_card_bg"
-                app:cardCornerRadius="16dp"
-                app:cardElevation="0dp"
-                app:strokeColor="@color/rule_card_stroke"
-                app:strokeWidth="1dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="16dp">
-
+                    <!-- Rule 2: Conversation Type (Direct Only vs Direct & Groups) -->
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:fontFamily="@font/inter_bold"
-                        android:text="@string/manual_reply_default_section_title"
+                        android:text="@string/manual_conv_type_label"
                         android:textColor="@color/text_primary"
-                        android:textSize="16sp" />
+                        android:textSize="14sp" />
 
-                    <TextView
+                    <com.google.android.material.chip.ChipGroup
+                        android:id="@+id/chip_group_manual_conversation_type"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:fontFamily="@font/noto_sans"
-                        android:text="@string/manual_reply_default_section_subtitle"
-                        android:textColor="@color/text_secondary"
-                        android:textSize="13sp" />
+                        android:layout_marginTop="6dp"
+                        app:selectionRequired="true"
+                        app:singleSelection="true">
 
-                    <com.google.android.material.textfield.TextInputLayout
-                        android:id="@+id/til_default_manual_reply"
-                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:hint="@string/mainAutoReplyTextPlaceholder"
-                        app:counterEnabled="true"
-                        app:counterMaxLength="500"
-                        app:endIconMode="clear_text">
-
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/et_default_manual_reply"
-                            android:layout_width="match_parent"
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chip_manual_conv_direct"
+                            style="@style/Widget.Material3.Chip.Filter"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:gravity="top|start"
-                            android:inputType="textMultiLine|textCapSentences"
-                            android:minLines="3" />
-                    </com.google.android.material.textfield.TextInputLayout>
+                            android:checked="true"
+                            android:text="@string/manual_conv_direct_only" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chip_manual_conv_both"
+                            style="@style/Widget.Material3.Chip.Filter"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/manual_conv_direct_and_groups" />
+                    </com.google.android.material.chip.ChipGroup>
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:layout_marginVertical="16dp"
+                        android:background="@color/rule_card_stroke" />
+
+                    <!-- Rule 3: Contacts Filter -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="@font/inter_bold"
+                                android:text="@string/manual_contacts_label"
+                                android:textColor="@color/text_primary"
+                                android:textSize="14sp" />
+
+                            <TextView
+                                android:id="@+id/tv_manual_contacts_status"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="2dp"
+                                android:fontFamily="@font/noto_sans"
+                                android:text="@string/manual_contacts_all"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="12sp" />
+                        </LinearLayout>
+
+                        <com.google.android.material.materialswitch.MaterialSwitch
+                            android:id="@+id/switch_manual_contact_filter"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:contentDescription="@string/manual_contacts_label"
+                            android:minWidth="48dp"
+                            android:minHeight="48dp" />
+                    </LinearLayout>
 
                     <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btn_save_default_manual_reply"
-                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:id="@+id/btn_choose_manual_contacts"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
                         android:layout_width="match_parent"
                         android:layout_height="48dp"
                         android:layout_marginTop="10dp"
-                        android:fontFamily="@font/inter_bold"
-                        android:text="@string/manual_reply_save_message_btn"
-                        app:cornerRadius="12dp" />
+                        android:fontFamily="@font/inter_medium"
+                        android:text="@string/manual_contacts_choose_btn"
+                        android:textSize="13sp"
+                        app:cornerRadius="12dp"
+                        app:icon="@drawable/ic_baseline_people_24"
+                        app:iconSize="18dp" />
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:layout_marginVertical="16dp"
+                        android:background="@color/rule_card_stroke" />
+
+                    <!-- Rule 4: Supported Apps -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="@font/inter_bold"
+                                android:text="@string/manual_apps_label"
+                                android:textColor="@color/text_primary"
+                                android:textSize="14sp" />
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="2dp"
+                                android:fontFamily="@font/noto_sans"
+                                android:text="@string/manual_apps_desc"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="12sp" />
+                        </LinearLayout>
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btn_manual_select_all_apps"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="48dp"
+                            android:fontFamily="@font/inter_medium"
+                            android:text="@string/select_all_apps"
+                            android:textSize="13sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/tv_manual_apps_error"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:fontFamily="@font/inter_medium"
+                        android:text="@string/error_select_one_app"
+                        android:textColor="@color/rule_danger"
+                        android:textSize="12sp"
+                        android:visibility="gone" />
+
+                    <LinearLayout
+                        android:id="@+id/manual_apps_container"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:orientation="vertical" />
+
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
+
+            <!-- Primary Save CTA -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_save_manual_config"
+                android:layout_width="match_parent"
+                android:layout_height="54dp"
+                android:layout_marginTop="20dp"
+                android:fontFamily="@font/inter_bold"
+                android:text="@string/manual_save_config_btn"
+                android:textSize="15sp"
+                app:cornerRadius="14dp" />
 
         </LinearLayout>
     </ScrollView>
