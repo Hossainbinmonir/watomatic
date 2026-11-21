@@ -7,7 +7,8 @@ import kotlinx.coroutines.withContext
 
 class ReplyHistoryRepository @JvmOverloads constructor(
     private val logsDao: MessageLogsDao,
-    private val attemptDao: ReplyAttemptDao? = null
+    private val attemptDao: ReplyAttemptDao? = null,
+    private val db: MessageLogsDB? = null
 ) {
 
     val groupedReplyHistory: Flow<List<ReplyHistorySummaryItem>> =
@@ -29,15 +30,29 @@ class ReplyHistoryRepository @JvmOverloads constructor(
     suspend fun deleteTimelineItem(item: ReplyHistoryDetailItem) = withContext(Dispatchers.IO) {
         val attemptId = item.attemptId
         if (!attemptId.isNullOrBlank()) {
-            attemptDao?.deleteByAttemptIdSync(attemptId)
-            logsDao.deleteByAttemptIdSync(attemptId)
+            val action = Runnable {
+                attemptDao?.deleteByAttemptIdSync(attemptId)
+                logsDao.deleteByAttemptIdSync(attemptId)
+            }
+            if (db != null) {
+                db.runInTransaction(action)
+            } else {
+                action.run()
+            }
         } else if (item.id > 0) {
             logsDao.deleteReplyByIdSync(item.id)
         }
     }
 
     suspend fun clearAllHistory() = withContext(Dispatchers.IO) {
-        logsDao.clearAllLogsSync()
-        attemptDao?.clearAllAttemptsSync()
+        val action = Runnable {
+            logsDao.clearAllLogsSync()
+            attemptDao?.clearAllAttemptsSync()
+        }
+        if (db != null) {
+            db.runInTransaction(action)
+        } else {
+            action.run()
+        }
     }
 }

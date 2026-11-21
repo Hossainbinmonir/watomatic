@@ -47,7 +47,7 @@ data class ReplyHistoryUiState(
 class ReplyHistoryViewModel(application: Application) : AndroidViewModel(application) {
     private val repository: ReplyHistoryRepository by lazy {
         val db = MessageLogsDB.getInstance(application)
-        ReplyHistoryRepository(db.logsDao(), db.replyAttemptDao())
+        ReplyHistoryRepository(db.logsDao(), db.replyAttemptDao(), db)
     }
 
     private val searchQuery = MutableStateFlow("")

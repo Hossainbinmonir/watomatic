@@ -127,4 +127,47 @@ class ReplyHistoryTest {
         assertNotNull(controller.get())
         assertTrue(!controller.get().isFinishing)
     }
+
+    @Test
+    fun `clearAllHistory removes logs and attempts transactionally while preserving dispatch claims`() = runBlocking {
+        val repoWithDb = ReplyHistoryRepository(db.logsDao(), db.replyAttemptDao(), db)
+        val attempt = com.parishod.watomatic.service.reply.ReplyAttempt.create(
+            com.parishod.watomatic.service.reply.ReplySourceType.DEFAULT,
+            "Default",
+            "com.whatsapp",
+            "nk-hist-1",
+            "Hi there",
+            "evt_hist_preserve"
+        )
+        assertTrue(
+            dbUtils.tryAcquireNotificationClaim(
+                "evt_hist_preserve",
+                attempt.attemptId,
+                "com.whatsapp",
+                "alice",
+                "nk-hist-1",
+                1000L,
+                false
+            ).acquired
+        )
+        val res = com.parishod.watomatic.service.reply.ReplyExecutionResult(
+            attempt.attemptId,
+            com.parishod.watomatic.service.reply.ReplyExecutionStatus.DISPATCHED,
+            true,
+            true,
+            null,
+            "ok",
+            1500L
+        )
+        dbUtils.recordAttemptAndClaimResult("evt_hist_preserve", attempt, res, "Alice", "Hey", null)
+        assertEquals(1, dbUtils.totalAttemptCount)
+        assertEquals(1L, dbUtils.numReplies)
+        assertNotNull(dbUtils.getNotificationClaim("evt_hist_preserve"))
+
+        repoWithDb.clearAllHistory()
+
+        assertEquals(0, dbUtils.totalAttemptCount)
+        assertEquals(0L, dbUtils.numReplies)
+        assertEquals("DISPATCHED", dbUtils.getNotificationClaim("evt_hist_preserve")?.claimStatus)
+    }
 }

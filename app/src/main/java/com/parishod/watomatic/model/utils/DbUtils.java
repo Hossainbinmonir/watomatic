@@ -185,6 +185,23 @@ public class DbUtils {
         messageLogsDB.replyAttemptDao().upsertAttemptSafely(entity);
     }
 
+    public void recordAttemptAndClaimResult(
+            @Nullable String eventKey,
+            @NonNull ReplyAttempt attempt,
+            @NonNull ReplyExecutionResult result,
+            @Nullable String senderName,
+            @Nullable String incomingMsg,
+            @Nullable StatusBarNotification sbn
+    ) {
+        MessageLogsDB messageLogsDB = MessageLogsDB.getInstance(mContext.getApplicationContext());
+        messageLogsDB.runInTransaction(() -> {
+            recordAttemptResult(attempt, result, senderName, incomingMsg, sbn);
+            if (eventKey != null) {
+                updateNotificationClaimResult(eventKey, attempt.getAttemptId(), result);
+            }
+        });
+    }
+
     public void recordAttemptResult(
             @NonNull ReplyAttempt attempt,
             @NonNull ReplyExecutionResult result,
@@ -194,29 +211,31 @@ public class DbUtils {
     ) {
         MessageLogsDB messageLogsDB = MessageLogsDB.getInstance(mContext.getApplicationContext());
         ReplyAttemptEntity entity = ReplyAttemptEntity.fromResult(attempt, result, senderName, incomingMsg);
-        messageLogsDB.replyAttemptDao().upsertAttemptSafely(entity);
+        messageLogsDB.runInTransaction(() -> {
+            messageLogsDB.replyAttemptDao().upsertAttemptSafely(entity);
 
-        if (result.isDispatched()) {
-            if (messageLogsDB.logsDao().countByAttemptIdSync(attempt.getAttemptId()) == 0) {
-                String pkg = (sbn != null && sbn.getPackageName() != null)
-                        ? sbn.getPackageName()
-                        : attempt.getPackageName();
-                long arrivedTime = (sbn != null && sbn.getNotification() != null)
-                        ? sbn.getNotification().when
-                        : attempt.getCreatedAtMs();
-                logReplyInternal(
-                        pkg,
-                        arrivedTime,
-                        senderName,
-                        incomingMsg,
-                        attempt.getReplyText() != null ? attempt.getReplyText() : "",
-                        attempt.getSourceLabel(),
-                        ReplyHistoryStatus.DISPATCHED,
-                        attempt.getAttemptId(),
-                        result.getTimestampMs()
-                );
+            if (result.isDispatched()) {
+                if (messageLogsDB.logsDao().countByAttemptIdSync(attempt.getAttemptId()) == 0) {
+                    String pkg = (sbn != null && sbn.getPackageName() != null)
+                            ? sbn.getPackageName()
+                            : attempt.getPackageName();
+                    long arrivedTime = (sbn != null && sbn.getNotification() != null)
+                            ? sbn.getNotification().when
+                            : attempt.getCreatedAtMs();
+                    logReplyInternal(
+                            pkg,
+                            arrivedTime,
+                            senderName,
+                            incomingMsg,
+                            attempt.getReplyText() != null ? attempt.getReplyText() : "",
+                            attempt.getSourceLabel(),
+                            ReplyHistoryStatus.DISPATCHED,
+                            attempt.getAttemptId(),
+                            result.getTimestampMs()
+                    );
+                }
             }
-        }
+        });
     }
 
     @Nullable
@@ -243,24 +262,28 @@ public class DbUtils {
     ) {
         String safePackage = packageName != null ? packageName : "";
         MessageLogsDB messageLogsDB = MessageLogsDB.getInstance(mContext.getApplicationContext());
-        int packageIndex = messageLogsDB.appPackageDao().getPackageIndex(safePackage);
-        if (packageIndex <= 0) {
-            AppPackage appPackage = new AppPackage(safePackage);
-            messageLogsDB.appPackageDao().insertAppPackage(appPackage);
-            packageIndex = messageLogsDB.appPackageDao().getPackageIndex(safePackage);
+        synchronized (AppPackage.class) {
+            messageLogsDB.runInTransaction(() -> {
+                int packageIndex = messageLogsDB.appPackageDao().getPackageIndex(safePackage);
+                if (packageIndex <= 0) {
+                    AppPackage appPackage = new AppPackage(safePackage);
+                    messageLogsDB.appPackageDao().insertAppPackage(appPackage);
+                    packageIndex = messageLogsDB.appPackageDao().getPackageIndex(safePackage);
+                }
+                MessageLog logs = new MessageLog(
+                        packageIndex,
+                        title,
+                        incomingMsg,
+                        arrivedTime,
+                        repliedMsg,
+                        matchedRuleName,
+                        replyTime,
+                        executionStatus,
+                        attemptId
+                );
+                messageLogsDB.logsDao().logReply(logs);
+            });
         }
-        MessageLog logs = new MessageLog(
-                packageIndex,
-                title,
-                incomingMsg,
-                arrivedTime,
-                repliedMsg,
-                matchedRuleName,
-                replyTime,
-                executionStatus,
-                attemptId
-        );
-        messageLogsDB.logsDao().logReply(logs);
     }
 
     public long getLastRepliedTime(String packageName, String title) {

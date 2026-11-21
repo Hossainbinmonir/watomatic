@@ -290,4 +290,100 @@ class NotificationReplyRecoveryAndClaimTest {
         assertNotNull(claimDao.getClaimByEventKeySync("active_dispatching"))
         assertNotNull(claimDao.getClaimByEventKeySync("unresolved_unknown"))
     }
+
+    @Test
+    fun `recovery reconciles GENERATED attempt paired with DISPATCHING claim conservatively to UNKNOWN`() {
+        val attemptDao = db.replyAttemptDao()
+        val claimDao = db.notificationDispatchClaimDao()
+
+        attemptDao.upsertAttemptSafely(
+            ReplyAttemptEntity(
+                attemptId = "att-mismatch-gen",
+                eventKey = "evt_mismatch_gen",
+                packageName = "com.whatsapp",
+                senderName = "Bob",
+                incomingMessage = "Hello",
+                notificationKey = "nk-mismatch-gen",
+                replyText = "Hi",
+                sourceType = "DEFAULT",
+                sourceLabel = "Default",
+                status = ReplyExecutionStatus.GENERATED.name,
+                dispatchAttempted = false,
+                dispatchedNormally = false,
+                failureCategory = null,
+                createdAtMs = 1000L,
+                updatedAtMs = 1000L
+            )
+        )
+        assertTrue(dbUtils.tryAcquireNotificationClaim("evt_mismatch_gen", "att-mismatch-gen", "com.whatsapp", "bob", "nk-mismatch-gen", 1000L, false).acquired)
+        assertEquals(1, dbUtils.updateNotificationClaimTransition("evt_mismatch_gen", "att-mismatch-gen", "att-mismatch-gen", ReplyExecutionStatus.DISPATCHING, 1010L))
+
+        val summary = NotificationReplyRecoveryManager.recoverOnStartup(context, 50_000L)
+        assertEquals(1, summary.recoveredDispatchingCount)
+        assertEquals(0, summary.recoveredOrphanClaimsCount)
+
+        val recoveredAttempt = attemptDao.getAttemptByIdSync("att-mismatch-gen")!!
+        val recoveredClaim = claimDao.getClaimByEventKeySync("evt_mismatch_gen")!!
+        assertEquals("UNKNOWN", recoveredAttempt.status)
+        assertEquals(ReplyExecutionManager.FAILURE_DISPATCHING_INTERRUPTED, recoveredAttempt.failureCategory)
+        assertTrue(recoveredAttempt.dispatchAttempted)
+        assertEquals("UNKNOWN", recoveredClaim.claimStatus)
+    }
+
+    @Test
+    fun `recovery reconciles DISPATCHING attempt to DISPATCHED when claim is DISPATCHED and message log exists`() {
+        val attemptDao = db.replyAttemptDao()
+        val claimDao = db.notificationDispatchClaimDao()
+
+        db.appPackageDao().insertAppPackage(com.parishod.watomatic.model.logs.AppPackage("com.whatsapp"))
+        val pkgIdx = db.appPackageDao().getPackageIndex("com.whatsapp")
+        db.logsDao().logReply(
+            com.parishod.watomatic.model.logs.MessageLog(
+                pkgIdx, "Bob", "Hey", 1000L, "On it", null, 1020L,
+                com.parishod.watomatic.model.logs.ReplyHistoryStatus.DISPATCHED, "att-reconcile-disp"
+            )
+        )
+        attemptDao.upsertAttemptSafely(
+            ReplyAttemptEntity(
+                attemptId = "att-reconcile-disp",
+                eventKey = "evt_reconcile_disp",
+                packageName = "com.whatsapp",
+                senderName = "Bob",
+                incomingMessage = "Hey",
+                notificationKey = "nk-reconcile-disp",
+                replyText = "On it",
+                sourceType = "DEFAULT",
+                sourceLabel = "Default",
+                status = ReplyExecutionStatus.DISPATCHING.name,
+                dispatchAttempted = true,
+                dispatchedNormally = false,
+                failureCategory = null,
+                createdAtMs = 1000L,
+                updatedAtMs = 1010L
+            )
+        )
+        claimDao.insertClaimIgnoreSync(
+            NotificationDispatchClaimEntity(
+                eventKey = "evt_reconcile_disp",
+                attemptId = "att-reconcile-disp",
+                packageName = "com.whatsapp",
+                senderKey = "bob",
+                notificationKey = "nk-reconcile-disp",
+                claimStatus = ReplyExecutionStatus.DISPATCHED.name,
+                failureCategory = null,
+                dispatchAttempted = true,
+                dispatchedNormally = true,
+                createdAtMs = 1000L,
+                updatedAtMs = 1020L,
+                expiresAtMs = 999_999L
+            )
+        )
+
+        NotificationReplyRecoveryManager.recoverOnStartup(context, 50_000L)
+
+        val reconciled = attemptDao.getAttemptByIdSync("att-reconcile-disp")!!
+        assertEquals("DISPATCHED", reconciled.status)
+        assertTrue(reconciled.dispatchAttempted)
+        assertTrue(reconciled.dispatchedNormally)
+    }
 }

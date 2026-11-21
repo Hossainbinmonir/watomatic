@@ -46,12 +46,29 @@ object NotificationReplyRecoveryManager {
 
     @JvmStatic
     @JvmOverloads
+    fun tryRecoverOnStartup(
+        context: Context,
+        nowMs: Long = System.currentTimeMillis()
+    ): Boolean {
+        return try {
+            val db = MessageLogsDB.getInstance(context.applicationContext)
+            recoverDatabase(db, nowMs)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Recovery attempt failed due to storage error (${e.javaClass.simpleName})")
+            false
+        }
+    }
+
+    @JvmStatic
+    @JvmOverloads
     fun recoverDatabase(
         db: MessageLogsDB,
         nowMs: Long = System.currentTimeMillis()
     ): RecoverySummary {
         val attemptDao = db.replyAttemptDao()
         val claimDao = db.notificationDispatchClaimDao()
+        val logsDao = db.logsDao()
 
         var generatedRecovered = 0
         var dispatchingRecovered = 0
@@ -61,65 +78,121 @@ object NotificationReplyRecoveryManager {
             val unresolvedAttempts = attemptDao.getUnresolvedAttemptsSync()
             for (attempt in unresolvedAttempts) {
                 val safeTimestamp = maxOf(attempt.updatedAtMs, nowMs)
+                val linkedClaim = resolveClaimForAttempt(attempt, claimDao)
+                val hasVerifiedDispatchedProof = linkedClaim != null &&
+                    linkedClaim.attemptId == attempt.attemptId &&
+                    linkedClaim.claimStatus == ReplyExecutionStatus.DISPATCHED.name &&
+                    logsDao.countByAttemptIdSync(attempt.attemptId) > 0
+
                 when (attempt.status) {
                     ReplyExecutionStatus.DISPATCHING.name -> {
-                        val updatedAttempt = attempt.copy(
-                            status = ReplyExecutionStatus.UNKNOWN.name,
-                            dispatchAttempted = true,
-                            dispatchedNormally = false,
-                            failureCategory = ReplyAttemptEntity.sanitizeFailureCategory(
-                                ReplyExecutionManager.FAILURE_DISPATCHING_INTERRUPTED
-                            ),
-                            updatedAtMs = safeTimestamp
-                        )
-                        attemptDao.upsertAttemptSafely(updatedAttempt)
-                        dispatchingRecovered++
-
-                        val linkedClaim = resolveClaimForAttempt(attempt, claimDao)
-                        if (linkedClaim != null &&
-                            (linkedClaim.claimStatus == NotificationDispatchClaimEntity.STATUS_CLAIMED ||
-                                linkedClaim.claimStatus == ReplyExecutionStatus.GENERATED.name ||
-                                linkedClaim.claimStatus == ReplyExecutionStatus.DISPATCHING.name)
-                        ) {
-                            claimDao.recoverUnresolvedClaimSync(
-                                eventKey = linkedClaim.eventKey,
-                                newStatus = ReplyExecutionStatus.UNKNOWN.name,
-                                failureCategory = updatedAttempt.failureCategory,
+                        if (hasVerifiedDispatchedProof) {
+                            val reconciled = attempt.copy(
+                                status = ReplyExecutionStatus.DISPATCHED.name,
+                                dispatchAttempted = true,
+                                dispatchedNormally = true,
+                                failureCategory = null,
+                                updatedAtMs = safeTimestamp
+                            )
+                            attemptDao.upsertAttemptSafely(reconciled)
+                            dispatchingRecovered++
+                        } else {
+                            val updatedAttempt = attempt.copy(
+                                status = ReplyExecutionStatus.UNKNOWN.name,
                                 dispatchAttempted = true,
                                 dispatchedNormally = false,
-                                updatedAtMs = safeTimestamp,
-                                expiresAtMs = safeTimestamp + NotificationDispatchClaimEntity.DEFAULT_UNRESOLVED_TTL_MS
+                                failureCategory = ReplyAttemptEntity.sanitizeFailureCategory(
+                                    ReplyExecutionManager.FAILURE_DISPATCHING_INTERRUPTED
+                                ),
+                                updatedAtMs = safeTimestamp
                             )
+                            attemptDao.upsertAttemptSafely(updatedAttempt)
+                            dispatchingRecovered++
+
+                            if (linkedClaim != null &&
+                                (linkedClaim.claimStatus == NotificationDispatchClaimEntity.STATUS_CLAIMED ||
+                                    linkedClaim.claimStatus == ReplyExecutionStatus.GENERATED.name ||
+                                    linkedClaim.claimStatus == ReplyExecutionStatus.DISPATCHING.name)
+                            ) {
+                                claimDao.recoverUnresolvedClaimSync(
+                                    eventKey = linkedClaim.eventKey,
+                                    newStatus = ReplyExecutionStatus.UNKNOWN.name,
+                                    failureCategory = updatedAttempt.failureCategory,
+                                    dispatchAttempted = true,
+                                    dispatchedNormally = false,
+                                    updatedAtMs = safeTimestamp,
+                                    expiresAtMs = safeTimestamp + NotificationDispatchClaimEntity.DEFAULT_UNRESOLVED_TTL_MS
+                                )
+                            }
                         }
                     }
 
                     ReplyExecutionStatus.GENERATED.name -> {
-                        val updatedAttempt = attempt.copy(
-                            status = ReplyExecutionStatus.CANCELLED.name,
-                            dispatchAttempted = false,
-                            dispatchedNormally = false,
-                            failureCategory = ReplyAttemptEntity.sanitizeFailureCategory(
-                                ReplyExecutionManager.FAILURE_GENERATED_INTERRUPTED
-                            ),
-                            updatedAtMs = safeTimestamp
-                        )
-                        attemptDao.upsertAttemptSafely(updatedAttempt)
-                        generatedRecovered++
-
-                        val linkedClaim = resolveClaimForAttempt(attempt, claimDao)
-                        if (linkedClaim != null &&
-                            (linkedClaim.claimStatus == NotificationDispatchClaimEntity.STATUS_CLAIMED ||
-                                linkedClaim.claimStatus == ReplyExecutionStatus.GENERATED.name)
+                        if (hasVerifiedDispatchedProof) {
+                            val reconciled = attempt.copy(
+                                status = ReplyExecutionStatus.DISPATCHED.name,
+                                dispatchAttempted = true,
+                                dispatchedNormally = true,
+                                failureCategory = null,
+                                updatedAtMs = safeTimestamp
+                            )
+                            attemptDao.upsertAttemptSafely(reconciled)
+                            generatedRecovered++
+                        } else if (linkedClaim != null &&
+                            linkedClaim.attemptId == attempt.attemptId &&
+                            (linkedClaim.claimStatus == ReplyExecutionStatus.DISPATCHING.name ||
+                                linkedClaim.claimStatus == ReplyExecutionStatus.UNKNOWN.name)
                         ) {
-                            claimDao.recoverUnresolvedClaimSync(
-                                eventKey = linkedClaim.eventKey,
-                                newStatus = ReplyExecutionStatus.CANCELLED.name,
-                                failureCategory = updatedAttempt.failureCategory,
+                            val updatedAttempt = attempt.copy(
+                                status = ReplyExecutionStatus.UNKNOWN.name,
+                                dispatchAttempted = true,
+                                dispatchedNormally = false,
+                                failureCategory = ReplyAttemptEntity.sanitizeFailureCategory(
+                                    ReplyExecutionManager.FAILURE_DISPATCHING_INTERRUPTED
+                                ),
+                                updatedAtMs = safeTimestamp
+                            )
+                            attemptDao.upsertAttemptSafely(updatedAttempt)
+                            dispatchingRecovered++
+
+                            if (linkedClaim.claimStatus == ReplyExecutionStatus.DISPATCHING.name) {
+                                claimDao.recoverUnresolvedClaimSync(
+                                    eventKey = linkedClaim.eventKey,
+                                    newStatus = ReplyExecutionStatus.UNKNOWN.name,
+                                    failureCategory = updatedAttempt.failureCategory,
+                                    dispatchAttempted = true,
+                                    dispatchedNormally = false,
+                                    updatedAtMs = safeTimestamp,
+                                    expiresAtMs = safeTimestamp + NotificationDispatchClaimEntity.DEFAULT_UNRESOLVED_TTL_MS
+                                )
+                            }
+                        } else {
+                            val updatedAttempt = attempt.copy(
+                                status = ReplyExecutionStatus.CANCELLED.name,
                                 dispatchAttempted = false,
                                 dispatchedNormally = false,
-                                updatedAtMs = safeTimestamp,
-                                expiresAtMs = safeTimestamp + NotificationDispatchClaimEntity.DEFAULT_RESOLVED_TTL_MS
+                                failureCategory = ReplyAttemptEntity.sanitizeFailureCategory(
+                                    ReplyExecutionManager.FAILURE_GENERATED_INTERRUPTED
+                                ),
+                                updatedAtMs = safeTimestamp
                             )
+                            attemptDao.upsertAttemptSafely(updatedAttempt)
+                            generatedRecovered++
+
+                            if (linkedClaim != null &&
+                                (linkedClaim.claimStatus == NotificationDispatchClaimEntity.STATUS_CLAIMED ||
+                                    linkedClaim.claimStatus == ReplyExecutionStatus.GENERATED.name)
+                            ) {
+                                claimDao.recoverUnresolvedClaimSync(
+                                    eventKey = linkedClaim.eventKey,
+                                    newStatus = ReplyExecutionStatus.CANCELLED.name,
+                                    failureCategory = updatedAttempt.failureCategory,
+                                    dispatchAttempted = false,
+                                    dispatchedNormally = false,
+                                    updatedAtMs = safeTimestamp,
+                                    expiresAtMs = safeTimestamp + NotificationDispatchClaimEntity.DEFAULT_RESOLVED_TTL_MS
+                                )
+                            }
                         }
                     }
                 }

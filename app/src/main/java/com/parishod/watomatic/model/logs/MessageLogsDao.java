@@ -24,9 +24,12 @@ public interface MessageLogsDao {
     @Query("SELECT COUNT(id) FROM MESSAGE_LOGS WHERE execution_status IN ('DISPATCHED', 'LEGACY')")
     long getNumReplies();
 
-    //https://stackoverflow.com/questions/11771580/deleting-android-sqlite-rows-older-than-x-days
-    @Query("DELETE FROM message_logs WHERE notif_reply_time <= strftime('%s', datetime('now', '-30 days'));")
+    // notif_reply_time is stored in epoch milliseconds; scale SQLite epoch seconds by 1000.
+    @Query("DELETE FROM message_logs WHERE notif_reply_time <= (CAST(strftime('%s', datetime('now', '-30 days')) AS INTEGER) * 1000);")
     void purgeMessageLogs();
+
+    @Query("DELETE FROM message_logs WHERE notif_reply_time <= :cutoffMs")
+    int purgeMessageLogsBeforeSync(long cutoffMs);
 
     @Query("SELECT notif_reply_time FROM MESSAGE_LOGS WHERE execution_status IN ('DISPATCHED', 'LEGACY') ORDER BY notif_reply_time DESC LIMIT 1")
     long getFirstRepliedTime();

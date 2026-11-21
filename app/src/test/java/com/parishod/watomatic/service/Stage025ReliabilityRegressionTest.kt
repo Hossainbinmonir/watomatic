@@ -654,6 +654,111 @@ class Stage025ReliabilityRegressionTest {
         }
     }
 
+    @Test
+    fun `PendingClaimHandoff capacity overflow evicts oldest entry without wiping active tokens`() {
+        PendingClaimHandoff.clear()
+        for (i in 1..600) {
+            PendingClaimHandoff.register("evt-handoff-$i", "tok-$i")
+        }
+        // Oldest entries (1..88) were evicted; recent entries remain intact
+        assertNull(PendingClaimHandoff.peek("evt-handoff-1"))
+        assertEquals("tok-600", PendingClaimHandoff.consume("evt-handoff-600"))
+        assertEquals("tok-599", PendingClaimHandoff.consume("evt-handoff-599"))
+        PendingClaimHandoff.clear()
+    }
+
+    @Test
+    fun `missing DB claim for preClaimedToken re-acquires atomically and blocks replay`() {
+        val sendCount = AtomicInteger(0)
+        service.setReplyExecutionManagerForTesting(
+            ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+                sendCount.incrementAndGet()
+            })
+        )
+        val sbn = buildSbn(id = 150, sender = "Hannah", message = "Missing row check")
+        val syntheticToken = "preclaimed-missing-row-token"
+
+        val first = service.sendActualReply(sbn, wearFromSbn(sbn), "Reply once", null, ReplySourceType.DEFAULT, null, syntheticToken)
+        assertEquals(ReplyExecutionStatus.DISPATCHED, first.status)
+        assertEquals(1, sendCount.get())
+
+        val eventKey = NotificationEventKeyBuilder.buildEventKey(sbn)!!
+        assertEquals("DISPATCHED", logsDb.notificationDispatchClaimDao().getClaimByEventKeySync(eventKey)?.claimStatus)
+
+        val second = service.sendActualReply(sbn, wearFromSbn(sbn), "Reply once", null, ReplySourceType.DEFAULT)
+        assertEquals(ReplyExecutionStatus.CANCELLED, second.status)
+        assertEquals(ReplyExecutionManager.FAILURE_DUPLICATE_EVENT, second.failureCategory)
+        assertEquals(1, sendCount.get())
+    }
+
+    @Test
+    fun `zero-second cooldown allows distinct messages while duplicate prevention still blocks identical redelivery`() {
+        prefs.setServicePref(true)
+        prefs.saveEnabledApps("com.whatsapp", true)
+        prefs.setAutoReplyDelay(0L)
+
+        val decider = NotificationReplyDecider(
+            prefs,
+            dbUtils,
+            com.parishod.watomatic.model.utils.ContactsHelper.Companion.getInstance(context)
+        )
+        val sendCount = AtomicInteger(0)
+        service.setReplyExecutionManagerForTesting(
+            ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+                sendCount.incrementAndGet()
+            })
+        )
+
+        val now = System.currentTimeMillis()
+        val sbn1 = buildSbn(id = 160, sender = "Ivan", message = "First question", whenMs = now)
+        assertTrue(decider.canReply(sbn1))
+        val res1 = service.sendActualReply(sbn1, wearFromSbn(sbn1), "Default reply", null, ReplySourceType.DEFAULT)
+        assertEquals(ReplyExecutionStatus.DISPATCHED, res1.status)
+
+        // Identical redelivery blocked by persistent event claim
+        val dup = service.sendActualReply(sbn1, wearFromSbn(sbn1), "Default reply", null, ReplySourceType.DEFAULT)
+        assertEquals(ReplyExecutionStatus.CANCELLED, dup.status)
+        assertEquals(ReplyExecutionManager.FAILURE_DUPLICATE_EVENT, dup.failureCategory)
+
+        // Distinct message from same sender 1ms later allowed with 0s cooldown
+        val sbn2 = buildSbn(id = 161, sender = "Ivan", message = "Second question", whenMs = now + 1L)
+        assertTrue(decider.canReply(sbn2))
+        val res2 = service.sendActualReply(sbn2, wearFromSbn(sbn2), "Default reply", null, ReplySourceType.DEFAULT)
+        assertEquals(ReplyExecutionStatus.DISPATCHED, res2.status)
+        assertEquals(2, sendCount.get())
+    }
+
+    @Test
+    fun `malformed custom OpenAI URL falls back safely without leaving claim stuck in CLAIMED`() {
+        prefs.setEnableByokReplies(true)
+        prefs.saveOpenAIApiKey("sk-test-key-123456")
+        prefs.saveOpenApiSource(Constants.CUSTOM_AI_PROVIDER_NAME)
+        prefs.saveCustomOpenAIApiUrl("not a valid url")
+        prefs.setAiMemoryEnabled(false)
+        prefs.setAiAutoNotesEnabled(false)
+
+        val sendCount = AtomicInteger(0)
+        service.setReplyExecutionManagerForTesting(
+            ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+                sendCount.incrementAndGet()
+            })
+        )
+        val sbn = buildSbn(id = 170, sender = "Julia", message = "Custom URL failure test")
+        val method = NotificationService::class.java.getDeclaredMethod(
+            "sendReply",
+            StatusBarNotification::class.java
+        )
+        method.isAccessible = true
+        method.invoke(service, sbn)
+        service.awaitAiMemoryIdleForTesting()
+
+        val eventKey = NotificationEventKeyBuilder.buildEventKey(sbn)!!
+        val claim = logsDb.notificationDispatchClaimDao().getClaimByEventKeySync(eventKey)!!
+        assertEquals("DISPATCHED", claim.claimStatus)
+        assertEquals(1, sendCount.get())
+        assertEquals(1L, dbUtils.numReplies)
+    }
+
     private fun <T> immediateCall(response: Response<T>): Call<T> = object : Call<T> {
         override fun enqueue(callback: Callback<T>) = callback.onResponse(this, response)
         override fun isExecuted(): Boolean = true
