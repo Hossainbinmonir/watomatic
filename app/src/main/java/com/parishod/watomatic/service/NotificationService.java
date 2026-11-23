@@ -32,6 +32,7 @@ import com.parishod.watomatic.model.ai.AiMemoryDao;
 import com.parishod.watomatic.model.ai.AiMemoryDatabase;
 import com.parishod.watomatic.model.ai.AiMemoryRepository;
 import com.parishod.watomatic.model.ai.AiNote;
+import com.parishod.watomatic.model.ai.PendingPostDispatchMemoryStore;
 import com.parishod.watomatic.model.logs.ClaimAcquireOutcome;
 import com.parishod.watomatic.model.logs.NotificationDispatchClaimEntity;
 import com.parishod.watomatic.model.rules.AutoReplyRulesDatabase;
@@ -46,6 +47,7 @@ import com.parishod.watomatic.model.utils.DbUtils;
 import com.parishod.watomatic.model.utils.NotificationHelper;
 import com.parishod.watomatic.model.utils.NotificationUtils;
 import com.parishod.watomatic.model.rules.AutoReplyRule;
+import com.parishod.watomatic.service.ai.AiConversationCoordinator;
 import com.parishod.watomatic.service.ai.AiPolicyDecision;
 import com.parishod.watomatic.service.ai.AiPromptAndPolicyHelper;
 import com.parishod.watomatic.service.ai.ParsedAiResponse;
@@ -85,6 +87,8 @@ public class NotificationService extends NotificationListenerService {
     private NotificationReplyDecider replyDecider;
     private RuleNotificationProcessor ruleNotificationProcessor;
     private ExecutorService aiMemoryExecutor;
+    private ExecutorService postDispatchPersistenceExecutor;
+    private ExecutorService lastPostDispatchPersistenceExecutor;
     private volatile ReplyExecutionManager replyExecutionManager;
 
     private final AtomicBoolean serviceDestroyed = new AtomicBoolean(false);
@@ -93,6 +97,7 @@ public class NotificationService extends NotificationListenerService {
     private final Object lifecycleLock = new Object();
     // Maps active async AI claimToken -> eventKey so service shutdown cancels interrupted claims cleanly
     private final ConcurrentHashMap<String, String> pendingAsyncClaims = new ConcurrentHashMap<>();
+    private final AiConversationCoordinator aiConversationCoordinator = new AiConversationCoordinator();
 
     @Override
     public void onCreate() {
@@ -104,6 +109,17 @@ public class NotificationService extends NotificationListenerService {
         if (!startupRecoverySucceeded.get() && !serviceDestroyed.get()) {
             if (NotificationReplyRecoveryManager.tryRecoverOnStartup(getApplicationContext())) {
                 startupRecoverySucceeded.set(true);
+                executePostDispatchPersistence(() -> {
+                    try {
+                        PendingPostDispatchMemoryStore.replayPendingEntries(
+                                getApplicationContext(),
+                                getAiMemoryRepository(),
+                                getDbUtils()
+                        );
+                    } catch (Exception e) {
+                        Log.w(TAG, "Failed replaying staged AI memory writes (" + e.getClass().getSimpleName() + ")");
+                    }
+                });
             }
         }
     }
@@ -137,11 +153,29 @@ public class NotificationService extends NotificationListenerService {
     @VisibleForTesting
     void awaitAiMemoryIdleForTesting() throws Exception {
         ExecutorService exec;
+        ExecutorService postExec;
+        ExecutorService lastPostExec;
         synchronized (lifecycleLock) {
             exec = aiMemoryExecutor;
+            postExec = postDispatchPersistenceExecutor;
+            lastPostExec = lastPostDispatchPersistenceExecutor;
         }
         if (exec != null && !exec.isShutdown()) {
             exec.submit(() -> { }).get(5, TimeUnit.SECONDS);
+        }
+        if (postExec != null) {
+            if (!postExec.isShutdown()) {
+                postExec.submit(() -> { }).get(5, TimeUnit.SECONDS);
+            } else {
+                postExec.awaitTermination(5, TimeUnit.SECONDS);
+            }
+        }
+        if (lastPostExec != null && lastPostExec != postExec) {
+            if (!lastPostExec.isShutdown()) {
+                lastPostExec.submit(() -> { }).get(5, TimeUnit.SECONDS);
+            } else {
+                lastPostExec.awaitTermination(5, TimeUnit.SECONDS);
+            }
         }
     }
 
@@ -183,6 +217,28 @@ public class NotificationService extends NotificationListenerService {
                 aiMemoryExecutor = Executors.newSingleThreadExecutor();
             }
             return aiMemoryExecutor;
+        }
+    }
+
+    private void executePostDispatchPersistence(@NonNull Runnable task) {
+        ExecutorService exec;
+        boolean drainImmediately;
+        synchronized (lifecycleLock) {
+            drainImmediately = serviceDestroyed.get();
+            if (postDispatchPersistenceExecutor == null || postDispatchPersistenceExecutor.isShutdown()) {
+                postDispatchPersistenceExecutor = Executors.newSingleThreadExecutor();
+            }
+            exec = postDispatchPersistenceExecutor;
+            lastPostDispatchPersistenceExecutor = exec;
+        }
+        exec.execute(task);
+        if (drainImmediately) {
+            synchronized (lifecycleLock) {
+                if (postDispatchPersistenceExecutor == exec) {
+                    exec.shutdown();
+                    postDispatchPersistenceExecutor = null;
+                }
+            }
         }
     }
 
@@ -443,7 +499,8 @@ public class NotificationService extends NotificationListenerService {
         final String senderName = sbn != null ? NotificationUtils.getTitle(sbn) : null;
         final String incomingMsg = extractIncomingMessage(sbn);
         final String eventKey = NotificationEventKeyBuilder.buildEventKey(sbn, incomingMsg);
-        final String senderKey = NotificationEventKeyBuilder.normalizeSenderKey(senderName);
+        final boolean isGroupConv = isGroupNotification(sbn);
+        final String senderKey = NotificationEventKeyBuilder.normalizeSenderKey(senderName, isGroupConv);
 
         String effectiveClaimToken = preClaimedToken;
         if (effectiveClaimToken == null && eventKey != null) {
@@ -466,6 +523,22 @@ public class NotificationService extends NotificationListenerService {
                     false,
                     ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN,
                     "Execution cancelled: NotificationService destroyed",
+                    System.currentTimeMillis()
+            );
+        }
+
+        if (sbn == null || eventKey == null) {
+            Log.w(TAG, "Reply dispatch rejected: missing notification metadata for persistent claim protection.");
+            if (effectiveClaimToken != null && eventKey != null) {
+                cancelPendingClaimSafely(eventKey, effectiveClaimToken, ReplyExecutionManager.FAILURE_MISSING_WEAR_DATA);
+            }
+            return new ReplyExecutionResult(
+                    effectiveClaimToken != null ? effectiveClaimToken : UUID.randomUUID().toString(),
+                    ReplyExecutionStatus.FAILED,
+                    false,
+                    false,
+                    ReplyExecutionManager.FAILURE_MISSING_WEAR_DATA,
+                    "Missing notification metadata for persistent claim protection",
                     System.currentTimeMillis()
             );
         }
@@ -600,9 +673,16 @@ public class NotificationService extends NotificationListenerService {
                         eventKey
                 );
 
+        final java.util.concurrent.atomic.AtomicBoolean inMemoryDispatchAttempted =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
         ReplyExecutionResult result;
         try {
             result = manager.executeReply(attempt, notificationWear, updatedAttempt -> {
+                if (updatedAttempt.getStatus() == ReplyExecutionStatus.DISPATCHING
+                        || updatedAttempt.getStatus() == ReplyExecutionStatus.DISPATCHED
+                        || updatedAttempt.getStatus() == ReplyExecutionStatus.UNKNOWN) {
+                    inMemoryDispatchAttempted.set(true);
+                }
                 if (updatedAttempt.getStatus() == ReplyExecutionStatus.GENERATED
                         || updatedAttempt.getStatus() == ReplyExecutionStatus.DISPATCHING) {
                     try {
@@ -627,14 +707,28 @@ public class NotificationService extends NotificationListenerService {
             });
         } catch (Exception e) {
             Log.e(TAG, "Unexpected exception during reply execution (" + e.getClass().getSimpleName() + ")");
-            boolean dispatchAttempted = false;
-            try {
-                com.parishod.watomatic.model.logs.ReplyAttemptEntity persistedAttempt = db.getAttemptById(attempt.getAttemptId());
-                if (persistedAttempt != null && persistedAttempt.getDispatchAttempted()) {
+            boolean dispatchAttempted = inMemoryDispatchAttempted.get();
+            if (!dispatchAttempted) {
+                try {
+                    com.parishod.watomatic.model.logs.ReplyAttemptEntity persistedAttempt = db.getAttemptById(attempt.getAttemptId());
+                    if (persistedAttempt != null && persistedAttempt.getDispatchAttempted()) {
+                        dispatchAttempted = true;
+                    }
+                } catch (Exception ignored) {
                     dispatchAttempted = true;
                 }
-            } catch (Exception ignored) {
-                dispatchAttempted = true;
+            }
+            if (!dispatchAttempted && eventKey != null) {
+                try {
+                    NotificationDispatchClaimEntity persistedClaim = db.getNotificationClaim(eventKey);
+                    if (persistedClaim != null
+                            && attempt.getAttemptId().equals(persistedClaim.getAttemptId())
+                            && persistedClaim.getDispatchAttempted()) {
+                        dispatchAttempted = true;
+                    }
+                } catch (Exception ignored) {
+                    dispatchAttempted = true;
+                }
             }
             result = new ReplyExecutionResult(
                     attempt.getAttemptId(),
@@ -653,13 +747,7 @@ public class NotificationService extends NotificationListenerService {
             db.recordAttemptAndClaimResult(eventKey, attempt, result, senderName, incomingMsg, sbn);
         } catch (Exception e) {
             Log.e(TAG, "Failed persisting reply execution and claim result (" + e.getClass().getSimpleName() + ")");
-            if (eventKey != null) {
-                try {
-                    db.updateNotificationClaimResult(eventKey, attempt.getAttemptId(), result);
-                } catch (Exception claimEx) {
-                    Log.e(TAG, "Failed persisting fallback notification claim result (" + claimEx.getClass().getSimpleName() + ")");
-                }
-            }
+            persistOutcomeFallback(db, eventKey, attempt, result, senderName, incomingMsg, sbn);
         }
 
         if (result.isDispatched()) {
@@ -737,6 +825,67 @@ public class NotificationService extends NotificationListenerService {
                     + ", category=" + result.getFailureCategory());
         }
         return result;
+    }
+
+    private void persistOutcomeFallback(
+            @NonNull DbUtils db,
+            @Nullable String eventKey,
+            @NonNull ReplyAttempt attempt,
+            @NonNull ReplyExecutionResult result,
+            @Nullable String senderName,
+            @Nullable String incomingMsg,
+            @Nullable StatusBarNotification sbn
+    ) {
+        try {
+            db.recordAttemptResult(attempt, result, senderName, incomingMsg, sbn);
+        } catch (Exception attemptEx) {
+            Log.e(TAG, "Failed persisting fallback reply attempt result (" + attemptEx.getClass().getSimpleName() + ")");
+        }
+
+        boolean dispatchedConsistentlyPersisted = false;
+        if (result.isDispatched()) {
+            try {
+                dispatchedConsistentlyPersisted = db.hasConsistentDispatchedPersistence(attempt.getAttemptId());
+            } catch (Exception checkEx) {
+                Log.e(TAG, "Failed verifying dispatched persistence consistency (" + checkEx.getClass().getSimpleName() + ")");
+                dispatchedConsistentlyPersisted = false;
+            }
+        }
+
+        if (result.isDispatched() && !dispatchedConsistentlyPersisted) {
+            // Never promote a claim to DISPATCHED while its attempt/MessageLog persistence is incomplete.
+            // Persist a conservative UNKNOWN outcome so duplicate replay stays locked and recovery stays safe.
+            ReplyExecutionResult conservativeResult = new ReplyExecutionResult(
+                    attempt.getAttemptId(),
+                    ReplyExecutionStatus.UNKNOWN,
+                    true,
+                    false,
+                    ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR,
+                    "Outcome persistence failed after dispatch",
+                    result.getTimestampMs() > 0L ? result.getTimestampMs() : System.currentTimeMillis()
+            );
+            try {
+                db.recordFallbackAttemptOutcome(attempt, conservativeResult, senderName, incomingMsg);
+            } catch (Exception fallbackAttemptEx) {
+                Log.e(TAG, "Failed persisting conservative attempt outcome (" + fallbackAttemptEx.getClass().getSimpleName() + ")");
+            }
+            if (eventKey != null) {
+                try {
+                    db.updateNotificationClaimResult(eventKey, attempt.getAttemptId(), conservativeResult);
+                } catch (Exception claimEx) {
+                    Log.e(TAG, "Failed persisting conservative notification claim result (" + claimEx.getClass().getSimpleName() + ")");
+                }
+            }
+            return;
+        }
+
+        if (eventKey != null) {
+            try {
+                db.updateNotificationClaimResult(eventKey, attempt.getAttemptId(), result);
+            } catch (Exception claimEx) {
+                Log.e(TAG, "Failed persisting fallback notification claim result (" + claimEx.getClass().getSimpleName() + ")");
+            }
+        }
     }
 
     @Nullable
@@ -827,8 +976,13 @@ public class NotificationService extends NotificationListenerService {
             claimToken = PendingClaimHandoff.consume(eventKey);
         }
 
+        if (sbn == null) {
+            releaseUnusedClaimSafely(eventKey, claimToken);
+            return;
+        }
+
         final NotificationWear notificationWear = NotificationUtils.extractWearNotification(sbn);
-        if (notificationWear.getRemoteInputs().isEmpty()) {
+        if (notificationWear.getRemoteInputs().isEmpty() || notificationWear.getPendingIntent() == null) {
             releaseUnusedClaimSafely(eventKey, claimToken);
             return;
         }
@@ -851,13 +1005,14 @@ public class NotificationService extends NotificationListenerService {
             if (claimToken == null && eventKey != null) {
                 String senderName = sbn != null ? NotificationUtils.getTitle(sbn) : null;
                 String packageName = (sbn != null && sbn.getPackageName() != null) ? sbn.getPackageName() : "";
+                boolean isGroupConv = isGroupNotification(sbn);
                 claimToken = UUID.randomUUID().toString();
                 try {
                     ClaimAcquireOutcome outcome = getDbUtils().tryAcquireNotificationClaim(
                             eventKey,
                             claimToken,
                             packageName,
-                            NotificationEventKeyBuilder.normalizeSenderKey(senderName),
+                            NotificationEventKeyBuilder.normalizeSenderKey(senderName, isGroupConv),
                             sbn != null ? sbn.getKey() : null,
                             System.currentTimeMillis(),
                             false
@@ -889,6 +1044,52 @@ public class NotificationService extends NotificationListenerService {
         }
     }
 
+    private static boolean isGroupNotification(@Nullable StatusBarNotification sbn) {
+        return sbn != null
+                && sbn.getNotification() != null
+                && sbn.getNotification().extras != null
+                && sbn.getNotification().extras.getBoolean("android.isGroupConversation", false);
+    }
+
+    private static void releasePermitSafely(@Nullable Runnable permitReleaser) {
+        if (permitReleaser != null) {
+            permitReleaser.run();
+        }
+    }
+
+    private void recordIncomingUserMessageSafely(
+            StatusBarNotification sbn,
+            String packageName,
+            String senderKey,
+            String senderDisplay,
+            String incomingMessage,
+            boolean memoryEnabled,
+            int maxTurnsToKeep
+    ) {
+        if (!memoryEnabled
+                || AiPromptAndPolicyHelper.isUnknownSender(senderKey)
+                || incomingMessage == null
+                || incomingMessage.trim().isEmpty()) {
+            return;
+        }
+        String incomingEventKey = buildIncomingEventKey(sbn, packageName, senderKey, incomingMessage);
+        String legacyIncomingEventKey = buildLegacyIncomingEventKey(sbn, packageName, senderKey, incomingMessage);
+        try {
+            getAiMemoryRepository().recordIncomingUserMessage(
+                    packageName,
+                    senderKey,
+                    senderDisplay,
+                    incomingMessage,
+                    incomingEventKey,
+                    maxTurnsToKeep,
+                    System.currentTimeMillis(),
+                    legacyIncomingEventKey
+            );
+        } catch (Exception e) {
+            Log.e(TAG, "Failed persisting incoming user message (" + e.getClass().getSimpleName() + ")");
+        }
+    }
+
     private void prepareAndFetchAiReply(
             StatusBarNotification sbn,
             NotificationWear notificationWear,
@@ -905,134 +1106,148 @@ public class NotificationService extends NotificationListenerService {
             cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
             return;
         }
-        ExecutorService memoryExec = getAiMemoryExecutor();
-        if (memoryExec == null) {
-            cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-            return;
-        }
+        final String packageName = (sbn != null && sbn.getPackageName() != null) ? sbn.getPackageName() : "";
+        final String rawTitle = sbn != null ? NotificationUtils.getTitle(sbn) : null;
+        final boolean isGroup = isGroupNotification(sbn);
+        final String senderKey = AiPromptAndPolicyHelper.normalizeSenderKey(rawTitle, isGroup);
+        final boolean unknownSender = AiPromptAndPolicyHelper.isUnknownSender(senderKey);
+        final String senderDisplay = (rawTitle != null && !rawTitle.trim().isEmpty()) ? rawTitle.trim() : "Unknown";
+        final String conversationKey = AiConversationCoordinator.buildConversationKey(packageName, senderKey, eventKey);
+
         trackAsyncClaim(claimToken, eventKey);
-        try {
-            memoryExec.execute(() -> {
-                if (serviceDestroyed.get()) {
-                    cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    return;
-                }
-                try {
-                    PreferencesManager prefs = PreferencesManager.getPreferencesInstance(this);
-                    String packageName = sbn.getPackageName() != null ? sbn.getPackageName() : "";
-                    String senderDisplay = NotificationUtils.getTitle(sbn);
-                    if (senderDisplay == null || senderDisplay.trim().isEmpty()) {
-                        senderDisplay = "Unknown";
-                    } else {
-                        senderDisplay = senderDisplay.trim();
-                    }
-                    String senderKey = AiPromptAndPolicyHelper.normalizeSenderKey(senderDisplay);
-                    boolean isGroup = sbn.getNotification() != null &&
-                            sbn.getNotification().extras != null &&
-                            sbn.getNotification().extras.getBoolean("android.isGroupConversation", false);
-
-                    AiMemoryDao memoryDao = AiMemoryDatabase.getInstance(getApplicationContext()).aiMemoryDao();
-                    long now = System.currentTimeMillis();
-
-                    if (enforceGlobalAiPolicy) {
-                        int cooldownSec = prefs.getAiCooldownSeconds();
-                        int maxReplies = prefs.getAiMaxRepliesPerSender();
-                        int windowMins = prefs.getAiFrequencyWindowMinutes();
-                        String groupFilter = prefs.getAiGroupFilterMode();
-
-                        Long lastReplyTime = memoryDao.getLastAiReplyTimeSync(packageName, senderKey);
-                        long sinceTime = AiPromptAndPolicyHelper.computeWindowSinceMillis(windowMins, now);
-                        int recentCount = (maxReplies > 0)
-                                ? memoryDao.getAiReplyCountSinceSync(packageName, senderKey, sinceTime)
-                                : 0;
-
-                        AiPolicyDecision decision = AiPromptAndPolicyHelper.shouldAllowAiReply(
-                                cooldownSec,
-                                maxReplies,
-                                groupFilter,
-                                isGroup,
-                                lastReplyTime,
-                                recentCount,
-                                now
-                        );
-
-                        if (decision != AiPolicyDecision.ALLOWED) {
-                            Log.d(TAG, "AI reply blocked by global AI policy: " + decision);
-                            if (!serviceDestroyed.get()
-                                    && decision != AiPolicyDecision.BLOCKED_GROUP_FILTER
-                                    && !prefs.isAiSkipWhenLimitReached()) {
-                                untrackAsyncClaim(claimToken);
-                                sendActualReply(
-                                        sbn,
-                                        notificationWear,
-                                        fallbackReplyText,
-                                        resolveFallbackSourceLabel(matchedRule, historySourceLabel),
-                                        ReplySourceType.AI_FALLBACK,
-                                        matchedRule,
-                                        claimToken
-                                );
-                            } else if (serviceDestroyed.get()) {
-                                cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                            } else {
-                                releaseUnusedClaimSafely(eventKey, claimToken);
-                            }
+        boolean submitted = aiConversationCoordinator.submit(
+                conversationKey,
+                this::getAiMemoryExecutor,
+                () -> cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN),
+                releasePermit -> {
+                    boolean handedOffToFetch = false;
+                    try {
+                        if (serviceDestroyed.get()) {
+                            cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                             return;
                         }
-                    }
+                        PreferencesManager prefs = PreferencesManager.getPreferencesInstance(this);
+                        boolean memoryEnabled = prefs.isAiMemoryEnabled() && !unknownSender;
+                        boolean notesEnabled = prefs.isAiAutoNotesEnabled();
+                        int maxTurnsToKeep = Math.max(20, prefs.getAiMemoryMaxTurns() * 2);
 
-                    if (serviceDestroyed.get()) {
-                        cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                        return;
-                    }
+                        AiMemoryDao memoryDao = AiMemoryDatabase.getInstance(getApplicationContext()).aiMemoryDao();
+                        long now = System.currentTimeMillis();
 
-                    boolean memoryEnabled = prefs.isAiMemoryEnabled();
-                    boolean notesEnabled = prefs.isAiAutoNotesEnabled();
+                        if (enforceGlobalAiPolicy) {
+                            int cooldownSec = prefs.getAiCooldownSeconds();
+                            int maxReplies = prefs.getAiMaxRepliesPerSender();
+                            int windowMins = prefs.getAiFrequencyWindowMinutes();
+                            String groupFilter = prefs.getAiGroupFilterMode();
 
-                    List<AiConversationMessage> historyAsc = new ArrayList<>();
-                    if (memoryEnabled) {
-                        int maxTurns = prefs.getAiMemoryMaxTurns();
-                        List<AiConversationMessage> desc = memoryDao.getRecentMessagesDescSync(packageName, senderKey, maxTurns);
-                        historyAsc.addAll(desc);
-                        Collections.reverse(historyAsc);
-                    }
+                            Long lastReplyTime = memoryDao.getLastAiReplyTimeSync(packageName, senderKey);
+                            long sinceTime = AiPromptAndPolicyHelper.computeWindowSinceMillis(windowMins, now);
+                            int recentCount = (maxReplies > 0)
+                                    ? memoryDao.getAiReplyCountSinceSync(packageName, senderKey, sinceTime)
+                                    : 0;
 
-                    List<AiNote> pendingNotes = notesEnabled
-                            ? memoryDao.getPendingNotesForSenderSync(packageName, senderDisplay, 5)
-                            : Collections.emptyList();
+                            AiPolicyDecision decision = AiPromptAndPolicyHelper.shouldAllowAiReply(
+                                    cooldownSec,
+                                    maxReplies,
+                                    groupFilter,
+                                    isGroup,
+                                    lastReplyTime,
+                                    recentCount,
+                                    now
+                            );
 
-                    if (serviceDestroyed.get()) {
-                        cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                        return;
-                    }
+                            if (decision != AiPolicyDecision.ALLOWED) {
+                                Log.d(TAG, "AI reply blocked by global AI policy: " + decision);
+                                if (decision != AiPolicyDecision.BLOCKED_GROUP_FILTER) {
+                                    recordIncomingUserMessageSafely(
+                                            sbn,
+                                            packageName,
+                                            senderKey,
+                                            senderDisplay,
+                                            incomingMessage,
+                                            memoryEnabled,
+                                            maxTurnsToKeep
+                                    );
+                                }
+                                if (!serviceDestroyed.get()
+                                        && decision != AiPolicyDecision.BLOCKED_GROUP_FILTER
+                                        && !prefs.isAiSkipWhenLimitReached()) {
+                                    untrackAsyncClaim(claimToken);
+                                    sendActualReply(
+                                            sbn,
+                                            notificationWear,
+                                            fallbackReplyText,
+                                            resolveFallbackSourceLabel(matchedRule, historySourceLabel),
+                                            ReplySourceType.AI_FALLBACK,
+                                            matchedRule,
+                                            claimToken
+                                    );
+                                } else if (serviceDestroyed.get()) {
+                                    cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                                } else {
+                                    releaseUnusedClaimSafely(eventKey, claimToken);
+                                }
+                                return;
+                            }
+                        }
 
-                    fetchAiReply(
-                            sbn,
-                            notificationWear,
-                            packageName,
-                            senderKey,
-                            senderDisplay,
-                            incomingMessage,
-                            historyAsc,
-                            pendingNotes,
-                            memoryEnabled,
-                            notesEnabled,
-                            ruleSpecificGuidance,
-                            historySourceLabel,
-                            fallbackReplyText,
-                            matchedRule,
-                            claimToken
-                    );
-                } catch (Exception e) {
-                    Log.e(TAG, "Unexpected error preparing AI reply (" + e.getClass().getSimpleName() + ")");
-                    if (serviceDestroyed.get()) {
-                        cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    } else {
-                        cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR);
+                        if (serviceDestroyed.get()) {
+                            cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                            return;
+                        }
+
+                        List<AiConversationMessage> historyAsc = new ArrayList<>();
+                        if (memoryEnabled) {
+                            int maxTurns = prefs.getAiMemoryMaxTurns();
+                            List<AiConversationMessage> desc = memoryDao.getRecentMessagesDescSync(packageName, senderKey, maxTurns);
+                            historyAsc.addAll(desc);
+                            Collections.reverse(historyAsc);
+                        }
+
+                        List<AiNote> pendingNotes = (notesEnabled && !unknownSender)
+                                ? memoryDao.getPendingNotesForSenderKeySync(packageName, senderKey, 5)
+                                : Collections.emptyList();
+
+                        if (serviceDestroyed.get()) {
+                            cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                            return;
+                        }
+
+                        handedOffToFetch = true;
+                        fetchAiReply(
+                                sbn,
+                                notificationWear,
+                                packageName,
+                                senderKey,
+                                senderDisplay,
+                                incomingMessage,
+                                historyAsc,
+                                pendingNotes,
+                                memoryEnabled,
+                                notesEnabled,
+                                ruleSpecificGuidance,
+                                historySourceLabel,
+                                fallbackReplyText,
+                                matchedRule,
+                                claimToken,
+                                releasePermit
+                        );
+                    } catch (Exception e) {
+                        Log.e(TAG, "Unexpected error preparing AI reply (" + e.getClass().getSimpleName() + ")");
+                        if (serviceDestroyed.get()) {
+                            cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                        } else {
+                            cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR);
+                        }
+                    } finally {
+                        if (!handedOffToFetch) {
+                            releasePermitSafely(releasePermit);
+                        }
                     }
                 }
-            });
-        } catch (Exception e) {
-            Log.e(TAG, "Failed scheduling AI reply preparation (" + e.getClass().getSimpleName() + ")");
+        );
+        if (!submitted) {
+            Log.e(TAG, "Failed scheduling AI reply preparation on coordinator");
             cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
         }
     }
@@ -1131,16 +1346,23 @@ public class NotificationService extends NotificationListenerService {
             String historySourceLabel,
             String fallbackReplyText,
             @Nullable AutoReplyRule matchedRule,
-            @Nullable String claimToken
+            @Nullable String claimToken,
+            @Nullable Runnable permitReleaser
     ) {
         final String claimEventKey = NotificationEventKeyBuilder.buildEventKey(sbn, incomingMessage);
         if (serviceDestroyed.get()) {
             cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+            releasePermitSafely(permitReleaser);
             return;
         }
         PreferencesManager prefs = PreferencesManager.getPreferencesInstance(this);
+        int maxTurnsToKeep = Math.max(20, prefs.getAiMemoryMaxTurns() * 2);
+        boolean effectiveMemoryEnabled = memoryEnabled && !AiPromptAndPolicyHelper.isUnknownSender(senderKey);
 
         if (ruleSpecificGuidance == null && matchedRule == null && !prefs.isByokRepliesEnabled()) {
+            recordIncomingUserMessageSafely(
+                    sbn, packageName, senderKey, senderDisplay, incomingMessage, effectiveMemoryEnabled, maxTurnsToKeep
+            );
             untrackAsyncClaim(claimToken);
             sendActualReply(
                     sbn,
@@ -1151,6 +1373,7 @@ public class NotificationService extends NotificationListenerService {
                     matchedRule,
                     claimToken
             );
+            releasePermitSafely(permitReleaser);
             return;
         }
 
@@ -1159,6 +1382,9 @@ public class NotificationService extends NotificationListenerService {
         if (apiKey != null) apiKey = apiKey.trim();
         if (!prefs.isSecureStorageAvailable() || apiKey == null || apiKey.isEmpty() || "PENDING_CONFIGURATION".equals(apiKey)) {
             Log.w(TAG, "Aborting AI request: API key unavailable or secure storage inaccessible.");
+            recordIncomingUserMessageSafely(
+                    sbn, packageName, senderKey, senderDisplay, incomingMessage, effectiveMemoryEnabled, maxTurnsToKeep
+            );
             recordAiError(prefs, prefs.getSecureStorageError() != null
                     ? prefs.getSecureStorageError()
                     : "API key unavailable");
@@ -1172,6 +1398,7 @@ public class NotificationService extends NotificationListenerService {
                     matchedRule,
                     claimToken
             );
+            releasePermitSafely(permitReleaser);
             return;
         }
         String provider = prefs.getOpenApiSource();
@@ -1189,11 +1416,12 @@ public class NotificationService extends NotificationListenerService {
         }
         model = model.trim();
 
+        String promptSenderName = AiPromptAndPolicyHelper.isUnknownSender(senderKey) ? null : senderDisplay;
         String systemPrompt = AiPromptAndPolicyHelper.buildAugmentedSystemPrompt(
                 basePrompt,
                 notesEnabled,
-                memoryEnabled,
-                senderDisplay,
+                effectiveMemoryEnabled,
+                promptSenderName,
                 pendingNotes,
                 ruleSpecificGuidance,
                 System.currentTimeMillis()
@@ -1219,6 +1447,9 @@ public class NotificationService extends NotificationListenerService {
             service = RetrofitInstance.getOpenAIRetrofitInstance(baseUrl).create(OpenAIService.class);
         } catch (Exception e) {
             Log.e(TAG, "Invalid AI provider configuration (" + e.getClass().getSimpleName() + ")");
+            recordIncomingUserMessageSafely(
+                    sbn, packageName, senderKey, senderDisplay, incomingMessage, effectiveMemoryEnabled, maxTurnsToKeep
+            );
             recordAiError(prefs, "Provider request failed");
             untrackAsyncClaim(claimToken);
             sendActualReply(
@@ -1230,48 +1461,35 @@ public class NotificationService extends NotificationListenerService {
                     matchedRule,
                     claimToken
             );
+            releasePermitSafely(permitReleaser);
             return;
         }
-        int maxTurnsToKeep = Math.max(20, prefs.getAiMemoryMaxTurns() * 2);
 
-        if (memoryEnabled && incomingMessage != null && !incomingMessage.trim().isEmpty()) {
-            final String incomingEventKey = buildIncomingEventKey(sbn, packageName, senderKey, incomingMessage);
-            try {
-                getAiMemoryRepository().recordIncomingUserMessage(
-                        packageName,
-                        senderKey,
-                        senderDisplay,
-                        incomingMessage,
-                        incomingEventKey,
-                        maxTurnsToKeep,
-                        System.currentTimeMillis()
-                );
-            } catch (Exception e) {
-                Log.e(TAG, "Failed persisting incoming user message (" + e.getClass().getSimpleName() + ")");
-            }
-        }
+        recordIncomingUserMessageSafely(
+                sbn, packageName, senderKey, senderDisplay, incomingMessage, effectiveMemoryEnabled, maxTurnsToKeep
+        );
 
         try {
             if ("Claude".equalsIgnoreCase(provider)) {
                 fetchClaudeReplyInternal(
                         prefs, service, baseUrl, apiKey, model, systemPrompt,
                         packageName, senderKey, senderDisplay, incomingMessage, historyAsc,
-                        memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
-                        sbn, notificationWear, fallbackReplyText, matchedRule, claimToken
+                        effectiveMemoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
+                        sbn, notificationWear, fallbackReplyText, matchedRule, claimToken, permitReleaser
                 );
             } else if ("Gemini".equalsIgnoreCase(provider)) {
                 fetchGeminiReplyInternal(
                         prefs, service, baseUrl, apiKey, model, systemPrompt,
                         packageName, senderKey, senderDisplay, incomingMessage, historyAsc,
-                        memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
-                        sbn, notificationWear, fallbackReplyText, matchedRule, claimToken
+                        effectiveMemoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
+                        sbn, notificationWear, fallbackReplyText, matchedRule, claimToken, permitReleaser
                 );
             } else {
                 fetchOpenAiCompatibleReplyInternal(
                         prefs, service, baseUrl, apiKey, model, systemPrompt,
                         packageName, senderKey, senderDisplay, incomingMessage, historyAsc,
-                        memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
-                        sbn, notificationWear, fallbackReplyText, matchedRule, claimToken
+                        effectiveMemoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
+                        sbn, notificationWear, fallbackReplyText, matchedRule, claimToken, permitReleaser
                 );
             }
         } catch (Exception e) {
@@ -1291,10 +1509,35 @@ public class NotificationService extends NotificationListenerService {
                         claimToken
                 );
             }
+            releasePermitSafely(permitReleaser);
         }
     }
 
+    @Nullable
     private String buildIncomingEventKey(
+            StatusBarNotification sbn,
+            String packageName,
+            String senderKey,
+            String incomingMessage
+    ) {
+        if (incomingMessage == null || incomingMessage.trim().isEmpty()) {
+            return null;
+        }
+        if (sbn != null) {
+            return NotificationEventKeyBuilder.buildEventKey(sbn, incomingMessage);
+        }
+        return AiPromptAndPolicyHelper.buildLegacyIncomingEventKey(
+                null,
+                0L,
+                0L,
+                packageName != null ? packageName : "",
+                senderKey != null ? senderKey : AiPromptAndPolicyHelper.UNKNOWN_SENDER,
+                incomingMessage
+        );
+    }
+
+    @Nullable
+    private String buildLegacyIncomingEventKey(
             StatusBarNotification sbn,
             String packageName,
             String senderKey,
@@ -1306,7 +1549,7 @@ public class NotificationService extends NotificationListenerService {
         String sbnKey = sbn != null ? sbn.getKey() : null;
         long postTime = sbn != null ? sbn.getPostTime() : 0L;
         long whenMs = (sbn != null && sbn.getNotification() != null) ? sbn.getNotification().when : 0L;
-        return AiPromptAndPolicyHelper.buildIncomingEventKey(
+        return AiPromptAndPolicyHelper.buildLegacyIncomingEventKey(
                 sbnKey,
                 postTime,
                 whenMs,
@@ -1325,18 +1568,15 @@ public class NotificationService extends NotificationListenerService {
             boolean memoryEnabled,
             int maxTurnsToKeep
     ) {
-        if (!memoryEnabled || serviceDestroyed.get() || incomingMessage == null || incomingMessage.trim().isEmpty()) {
-            return;
-        }
-        ExecutorService memoryExec = getAiMemoryExecutor();
-        if (memoryExec == null) {
+        if (!memoryEnabled
+                || AiPromptAndPolicyHelper.isUnknownSender(senderKey)
+                || incomingMessage == null
+                || incomingMessage.trim().isEmpty()) {
             return;
         }
         final String incomingEventKey = buildIncomingEventKey(sbn, packageName, senderKey, incomingMessage);
-        memoryExec.execute(() -> {
-            if (serviceDestroyed.get()) {
-                return;
-            }
+        final String legacyIncomingEventKey = buildLegacyIncomingEventKey(sbn, packageName, senderKey, incomingMessage);
+        executePostDispatchPersistence(() -> {
             try {
                 getAiMemoryRepository().recordIncomingUserMessage(
                         packageName,
@@ -1345,7 +1585,8 @@ public class NotificationService extends NotificationListenerService {
                         incomingMessage,
                         incomingEventKey,
                         maxTurnsToKeep,
-                        System.currentTimeMillis()
+                        System.currentTimeMillis(),
+                        legacyIncomingEventKey
                 );
             } catch (Exception e) {
                 Log.e(TAG, "Failed persisting incoming user message (" + e.getClass().getSimpleName() + ")");
@@ -1367,7 +1608,7 @@ public class NotificationService extends NotificationListenerService {
             int maxTurnsToKeep,
             String historySourceLabel
     ) {
-        handleSuccessfulAiReplyWithResult(
+        handleSuccessfulAiReplyWithResultInternal(
                 prefs,
                 sbn,
                 notificationWear,
@@ -1380,6 +1621,7 @@ public class NotificationService extends NotificationListenerService {
                 notesEnabled,
                 maxTurnsToKeep,
                 historySourceLabel,
+                null,
                 null,
                 null
         );
@@ -1400,7 +1642,7 @@ public class NotificationService extends NotificationListenerService {
             int maxTurnsToKeep,
             String historySourceLabel
     ) {
-        return handleSuccessfulAiReplyWithResult(
+        return handleSuccessfulAiReplyWithResultInternal(
                 prefs,
                 sbn,
                 notificationWear,
@@ -1414,11 +1656,12 @@ public class NotificationService extends NotificationListenerService {
                 maxTurnsToKeep,
                 historySourceLabel,
                 null,
+                null,
                 null
         );
     }
 
-    private ReplyExecutionResult handleSuccessfulAiReplyWithResult(
+    private ReplyExecutionResult handleSuccessfulAiReplyWithResultInternal(
             PreferencesManager prefs,
             StatusBarNotification sbn,
             NotificationWear notificationWear,
@@ -1432,12 +1675,14 @@ public class NotificationService extends NotificationListenerService {
             int maxTurnsToKeep,
             String historySourceLabel,
             @Nullable AutoReplyRule matchedRule,
-            @Nullable String claimToken
+            @Nullable String claimToken,
+            @Nullable Runnable permitReleaser
     ) {
         final String claimEventKey = NotificationEventKeyBuilder.buildEventKey(sbn, incomingMessage);
         if (serviceDestroyed.get()) {
             Log.d(TAG, "Ignoring late AI success after NotificationService destruction.");
             cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+            releasePermitSafely(permitReleaser);
             return new ReplyExecutionResult(
                     claimToken != null ? claimToken : "",
                     ReplyExecutionStatus.CANCELLED,
@@ -1450,9 +1695,7 @@ public class NotificationService extends NotificationListenerService {
         }
 
         untrackAsyncClaim(claimToken);
-        ParsedAiResponse parsed = notesEnabled
-                ? AiPromptAndPolicyHelper.parseAndStripNotes(rawAiReply)
-                : new ParsedAiResponse(rawAiReply != null ? rawAiReply.trim() : "", Collections.emptyList());
+        ParsedAiResponse parsed = AiPromptAndPolicyHelper.parseAndStripNotes(rawAiReply, notesEnabled);
 
         final String finalReply = parsed.getCleanReply();
         final List<String> extractedNotes = parsed.getExtractedNotes();
@@ -1461,56 +1704,128 @@ public class NotificationService extends NotificationListenerService {
         ReplySourceType aiSourceType = (matchedRule != null || (historySourceLabel != null && !historySourceLabel.equals(globalAiLabel)))
                 ? ReplySourceType.RULE_AI
                 : ReplySourceType.GLOBAL_AI;
-        final ReplyExecutionResult dispatchResult = sendActualReply(
-                sbn,
-                notificationWear,
-                finalReply,
-                historySourceLabel,
-                aiSourceType,
-                matchedRule,
-                claimToken
-        );
-        if (serviceDestroyed.get()) {
-            return dispatchResult;
+        final boolean recordReplyLog = (aiSourceType == ReplySourceType.GLOBAL_AI);
+        final boolean effectiveMemoryEnabled = memoryEnabled && !AiPromptAndPolicyHelper.isUnknownSender(senderKey);
+
+        final ReplyExecutionResult dispatchResult;
+        try {
+            dispatchResult = sendActualReply(
+                    sbn,
+                    notificationWear,
+                    finalReply,
+                    historySourceLabel,
+                    aiSourceType,
+                    matchedRule,
+                    claimToken
+            );
+        } catch (RuntimeException ex) {
+            releasePermitSafely(permitReleaser);
+            throw ex;
         }
+
         if (dispatchResult.isDispatched()) {
             prefs.clearOpenAILastPersistentError();
         }
 
-        ExecutorService memoryExec = getAiMemoryExecutor();
-        if (memoryExec == null) {
-            return dispatchResult;
-        }
         final String incomingEventKey = buildIncomingEventKey(sbn, packageName, senderKey, incomingMessage);
-        memoryExec.execute(() -> {
-            if (serviceDestroyed.get()) {
-                return;
-            }
-            try {
-                long eventTimestampMs = dispatchResult.getTimestampMs() > 0L
-                        ? dispatchResult.getTimestampMs()
-                        : System.currentTimeMillis();
-                boolean persisted = getAiMemoryRepository().persistAuthoritativeAiReplyOutcome(
-                        dispatchResult,
-                        packageName,
-                        senderKey,
-                        senderDisplay,
-                        incomingMessage,
-                        incomingEventKey,
-                        finalReply,
-                        extractedNotes,
-                        memoryEnabled,
-                        notesEnabled,
-                        maxTurnsToKeep,
-                        eventTimestampMs
-                );
-                if (persisted && notesEnabled && !extractedNotes.isEmpty()) {
-                    Log.i(TAG, "Saved AI note(s) for confirmed reply attempt.");
+        final String legacyIncomingEventKey = buildLegacyIncomingEventKey(sbn, packageName, senderKey, incomingMessage);
+        final android.content.Context appContext = getApplicationContext();
+
+        try {
+            executePostDispatchPersistence(() -> {
+                try {
+                    long eventTimestampMs = dispatchResult.getTimestampMs() > 0L
+                            ? dispatchResult.getTimestampMs()
+                            : System.currentTimeMillis();
+
+                    ReplyExecutionResult authoritativeOutcome = dispatchResult;
+                    if (dispatchResult.isDispatched()) {
+                        boolean consistentDispatchedPersistence = false;
+                        try {
+                            consistentDispatchedPersistence =
+                                    getDbUtils().hasConsistentDispatchedPersistence(dispatchResult.getExecutionId());
+                        } catch (Exception verifyEx) {
+                            Log.w(TAG, "Failed verifying dispatched persistence consistency (" + verifyEx.getClass().getSimpleName() + ")");
+                            consistentDispatchedPersistence = false;
+                        }
+                        if (!consistentDispatchedPersistence) {
+                            authoritativeOutcome = new ReplyExecutionResult(
+                                    dispatchResult.getExecutionId(),
+                                    ReplyExecutionStatus.UNKNOWN,
+                                    true,
+                                    false,
+                                    ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR,
+                                    "Skipped AI memory commit because MessageLogsDB outcome is not consistently DISPATCHED",
+                                    eventTimestampMs
+                            );
+                        }
+                    }
+
+                    if (authoritativeOutcome.isDispatched()
+                            && authoritativeOutcome.getExecutionId() != null
+                            && !authoritativeOutcome.getExecutionId().isEmpty()) {
+                        PendingPostDispatchMemoryStore.stage(
+                                appContext,
+                                new PendingPostDispatchMemoryStore.PendingPostDispatchEntry(
+                                        authoritativeOutcome.getExecutionId(),
+                                        authoritativeOutcome.getStatus().name(),
+                                        authoritativeOutcome.getDispatchAttempted(),
+                                        authoritativeOutcome.getDispatchedNormally(),
+                                        authoritativeOutcome.getFailureCategory(),
+                                        packageName,
+                                        senderKey,
+                                        senderDisplay,
+                                        incomingMessage != null ? incomingMessage : "",
+                                        incomingEventKey,
+                                        legacyIncomingEventKey,
+                                        finalReply,
+                                        extractedNotes,
+                                        effectiveMemoryEnabled,
+                                        notesEnabled,
+                                        recordReplyLog,
+                                        maxTurnsToKeep,
+                                        eventTimestampMs,
+                                        0,
+                                        System.currentTimeMillis()
+                                )
+                        );
+                    }
+
+                    boolean persisted = getAiMemoryRepository().persistAuthoritativeAiReplyOutcome(
+                            authoritativeOutcome,
+                            packageName,
+                            senderKey,
+                            senderDisplay,
+                            incomingMessage != null ? incomingMessage : "",
+                            incomingEventKey,
+                            finalReply,
+                            extractedNotes,
+                            effectiveMemoryEnabled,
+                            notesEnabled,
+                            maxTurnsToKeep,
+                            eventTimestampMs,
+                            legacyIncomingEventKey,
+                            recordReplyLog
+                    );
+                    if (authoritativeOutcome.isDispatched()) {
+                        PendingPostDispatchMemoryStore.remove(appContext, authoritativeOutcome.getExecutionId());
+                    }
+                    if (persisted && notesEnabled && !extractedNotes.isEmpty()) {
+                        Log.i(TAG, "Saved AI note(s) for confirmed reply attempt.");
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed persisting AI memory/notes (" + e.getClass().getSimpleName() + ")");
+                    if (dispatchResult.isDispatched()) {
+                        PendingPostDispatchMemoryStore.markRetryFailure(appContext, dispatchResult.getExecutionId());
+                    }
+                } finally {
+                    releasePermitSafely(permitReleaser);
                 }
-            } catch (Exception e) {
-                Log.e(TAG, "Failed persisting AI memory/notes (" + e.getClass().getSimpleName() + ")");
-            }
-        });
+            });
+        } catch (Exception scheduleEx) {
+            Log.e(TAG, "Failed scheduling post-dispatch AI memory persistence (" + scheduleEx.getClass().getSimpleName() + ")");
+            releasePermitSafely(permitReleaser);
+        }
         return dispatchResult;
     }
 
@@ -1527,7 +1842,7 @@ public class NotificationService extends NotificationListenerService {
                 prefs, service, baseUrl, apiKey, model, systemPrompt,
                 packageName, senderKey, senderDisplay, incomingMessage, historyAsc,
                 memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
-                sbn, notificationWear, fallbackReplyText, null, null
+                sbn, notificationWear, fallbackReplyText, null, null, null
         );
     }
 
@@ -1539,7 +1854,8 @@ public class NotificationService extends NotificationListenerService {
             boolean memoryEnabled, boolean notesEnabled, int maxTurnsToKeep,
             String historySourceLabel,
             StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText,
-            @Nullable AutoReplyRule matchedRule, @Nullable String claimToken
+            @Nullable AutoReplyRule matchedRule, @Nullable String claimToken,
+            @Nullable Runnable permitReleaser
     ) {
         JsonObject requestBody = new JsonObject();
         requestBody.addProperty("model", model);
@@ -1564,6 +1880,7 @@ public class NotificationService extends NotificationListenerService {
         final String claimEventKey = NotificationEventKeyBuilder.buildEventKey(sbn, incomingMessage);
         if (serviceDestroyed.get()) {
             cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+            releasePermitSafely(permitReleaser);
             return;
         }
         trackAsyncClaim(claimToken, claimEventKey);
@@ -1571,85 +1888,97 @@ public class NotificationService extends NotificationListenerService {
         service.getClaudeCompletion(url, headers, requestBody).enqueue(new Callback<JsonObject>() {
             @Override
             public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
-                if (serviceDestroyed.get()) {
-                    Log.d(TAG, "Ignoring late Claude response after NotificationService destruction.");
-                    cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    return;
-                }
-                if (!callbackHandled.compareAndSet(false, true)) {
-                    Log.d(TAG, "Ignoring duplicate Claude response callback.");
-                    return;
-                }
-                untrackAsyncClaim(claimToken);
-                if (response.isSuccessful() && response.body() != null) {
-                    try {
-                        JsonArray content = response.body().getAsJsonArray("content");
-                        if (content != null && content.size() > 0) {
-                            StringBuilder sb = new StringBuilder();
-                            for (int i = 0; i < content.size(); i++) {
-                                JsonObject block = content.get(i).getAsJsonObject();
-                                if (block.has("text") && !block.get("text").isJsonNull()) {
-                                    if (sb.length() > 0) sb.append("\n");
-                                    sb.append(block.get("text").getAsString());
+                boolean handedOffToSuccess = false;
+                try {
+                    if (serviceDestroyed.get()) {
+                        Log.d(TAG, "Ignoring late Claude response after NotificationService destruction.");
+                        cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                        return;
+                    }
+                    if (!callbackHandled.compareAndSet(false, true)) {
+                        Log.d(TAG, "Ignoring duplicate Claude response callback.");
+                        return;
+                    }
+                    untrackAsyncClaim(claimToken);
+                    if (response.isSuccessful() && response.body() != null) {
+                        try {
+                            JsonArray content = response.body().getAsJsonArray("content");
+                            if (content != null && content.size() > 0) {
+                                StringBuilder sb = new StringBuilder();
+                                for (int i = 0; i < content.size(); i++) {
+                                    JsonObject block = content.get(i).getAsJsonObject();
+                                    if (block.has("text") && !block.get("text").isJsonNull()) {
+                                        if (sb.length() > 0) sb.append("\n");
+                                        sb.append(block.get("text").getAsString());
+                                    }
+                                }
+                                String reply = sb.toString().trim();
+                                if (!reply.isEmpty()) {
+                                    handedOffToSuccess = true;
+                                    handleSuccessfulAiReplyWithResultInternal(
+                                            prefs, sbn, notificationWear, packageName, senderKey, senderDisplay,
+                                            incomingMessage, reply, memoryEnabled, notesEnabled, maxTurnsToKeep,
+                                            historySourceLabel, matchedRule, claimToken, permitReleaser
+                                    );
+                                    return;
                                 }
                             }
-                            String reply = sb.toString().trim();
-                            if (!reply.isEmpty()) {
-                                handleSuccessfulAiReplyWithResult(
-                                        prefs, sbn, notificationWear, packageName, senderKey, senderDisplay,
-                                        incomingMessage, reply, memoryEnabled, notesEnabled, maxTurnsToKeep,
-                                        historySourceLabel, matchedRule, claimToken
-                                );
-                                return;
-                            }
+                        } catch (Exception e) {
+                            Log.e(TAG, "Error parsing Claude response (" + e.getClass().getSimpleName() + ")");
                         }
-                    } catch (Exception e) {
-                        Log.e(TAG, "Error parsing Claude response (" + e.getClass().getSimpleName() + ")");
+                    }
+                    if (serviceDestroyed.get()) {
+                        cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                        return;
+                    }
+                    persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
+                    String err = response.isSuccessful() ? "Empty Claude response" : formatSafeHttpError(response);
+                    Log.e(TAG, "Claude API failed: " + err);
+                    recordAiError(prefs, err);
+                    sendActualReply(
+                            sbn,
+                            notificationWear,
+                            fallbackReplyText,
+                            resolveFallbackSourceLabel(matchedRule, historySourceLabel),
+                            ReplySourceType.AI_FALLBACK,
+                            matchedRule,
+                            claimToken
+                    );
+                } finally {
+                    if (!handedOffToSuccess) {
+                        releasePermitSafely(permitReleaser);
                     }
                 }
-                if (serviceDestroyed.get()) {
-                    cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    return;
-                }
-                persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
-                String err = response.isSuccessful() ? "Empty Claude response" : formatSafeHttpError(response);
-                Log.e(TAG, "Claude API failed: " + err);
-                recordAiError(prefs, err);
-                sendActualReply(
-                        sbn,
-                        notificationWear,
-                        fallbackReplyText,
-                        resolveFallbackSourceLabel(matchedRule, historySourceLabel),
-                        ReplySourceType.AI_FALLBACK,
-                        matchedRule,
-                        claimToken
-                );
             }
 
             @Override
             public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
-                if (serviceDestroyed.get()) {
-                    Log.d(TAG, "Ignoring late Claude failure after NotificationService destruction.");
-                    cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    return;
+                try {
+                    if (serviceDestroyed.get()) {
+                        Log.d(TAG, "Ignoring late Claude failure after NotificationService destruction.");
+                        cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                        return;
+                    }
+                    if (!callbackHandled.compareAndSet(false, true)) {
+                        Log.d(TAG, "Ignoring duplicate Claude failure callback.");
+                        return;
+                    }
+                    untrackAsyncClaim(claimToken);
+                    persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
+                    Log.e(TAG, "Claude API network error (" + t.getClass().getSimpleName() + ")");
+                    recordAiError(prefs, "Network error (" + t.getClass().getSimpleName() + ")");
+                    sendActualReply(
+                            sbn,
+                            notificationWear,
+                            fallbackReplyText,
+                            resolveFallbackSourceLabel(matchedRule, historySourceLabel),
+                            ReplySourceType.AI_FALLBACK,
+                            matchedRule,
+                            claimToken
+                    );
+                } finally {
+                    releasePermitSafely(permitReleaser);
                 }
-                if (!callbackHandled.compareAndSet(false, true)) {
-                    Log.d(TAG, "Ignoring duplicate Claude failure callback.");
-                    return;
-                }
-                untrackAsyncClaim(claimToken);
-                persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
-                Log.e(TAG, "Claude API network error (" + t.getClass().getSimpleName() + ")");
-                recordAiError(prefs, "Network error (" + t.getClass().getSimpleName() + ")");
-                sendActualReply(
-                        sbn,
-                        notificationWear,
-                        fallbackReplyText,
-                        resolveFallbackSourceLabel(matchedRule, historySourceLabel),
-                        ReplySourceType.AI_FALLBACK,
-                        matchedRule,
-                        claimToken
-                );
             }
         });
     }
@@ -1667,7 +1996,7 @@ public class NotificationService extends NotificationListenerService {
                 prefs, service, baseUrl, apiKey, model, systemPrompt,
                 packageName, senderKey, senderDisplay, incomingMessage, historyAsc,
                 memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
-                sbn, notificationWear, fallbackReplyText, null, null
+                sbn, notificationWear, fallbackReplyText, null, null, null
         );
     }
 
@@ -1679,7 +2008,8 @@ public class NotificationService extends NotificationListenerService {
             boolean memoryEnabled, boolean notesEnabled, int maxTurnsToKeep,
             String historySourceLabel,
             StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText,
-            @Nullable AutoReplyRule matchedRule, @Nullable String claimToken
+            @Nullable AutoReplyRule matchedRule, @Nullable String claimToken,
+            @Nullable Runnable permitReleaser
     ) {
         String cleanModel = model.startsWith("models/") ? model.substring("models/".length()) : model;
         String url;
@@ -1719,6 +2049,7 @@ public class NotificationService extends NotificationListenerService {
         final String claimEventKey = NotificationEventKeyBuilder.buildEventKey(sbn, incomingMessage);
         if (serviceDestroyed.get()) {
             cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+            releasePermitSafely(permitReleaser);
             return;
         }
         trackAsyncClaim(claimToken, claimEventKey);
@@ -1726,98 +2057,110 @@ public class NotificationService extends NotificationListenerService {
         service.getGeminiCompletion(url, apiKey, requestBody).enqueue(new Callback<JsonObject>() {
             @Override
             public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
-                if (serviceDestroyed.get()) {
-                    Log.d(TAG, "Ignoring late Gemini response after NotificationService destruction.");
-                    cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    return;
-                }
-                if (!callbackHandled.compareAndSet(false, true)) {
-                    Log.d(TAG, "Ignoring duplicate Gemini response callback.");
-                    return;
-                }
-                untrackAsyncClaim(claimToken);
-                if (response.isSuccessful() && response.body() != null) {
-                    try {
-                        JsonArray candidates = response.body().getAsJsonArray("candidates");
-                        if (candidates != null && candidates.size() > 0) {
-                            JsonObject candidate = candidates.get(0).getAsJsonObject();
-                            JsonObject content = candidate.getAsJsonObject("content");
-                            JsonArray respParts = content != null ? content.getAsJsonArray("parts") : null;
-                            if (respParts != null && respParts.size() > 0) {
-                                StringBuilder replyBuilder = new StringBuilder();
-                                String fallbackPartText = null;
-                                for (int i = 0; i < respParts.size(); i++) {
-                                    JsonObject p = respParts.get(i).getAsJsonObject();
-                                    boolean isThought = p.has("thought") && !p.get("thought").isJsonNull() && p.get("thought").getAsBoolean();
-                                    if (p.has("text") && !p.get("text").isJsonNull()) {
-                                        String txt = p.get("text").getAsString();
-                                        fallbackPartText = txt;
-                                        if (!isThought) {
-                                            replyBuilder.append(txt);
+                boolean handedOffToSuccess = false;
+                try {
+                    if (serviceDestroyed.get()) {
+                        Log.d(TAG, "Ignoring late Gemini response after NotificationService destruction.");
+                        cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                        return;
+                    }
+                    if (!callbackHandled.compareAndSet(false, true)) {
+                        Log.d(TAG, "Ignoring duplicate Gemini response callback.");
+                        return;
+                    }
+                    untrackAsyncClaim(claimToken);
+                    if (response.isSuccessful() && response.body() != null) {
+                        try {
+                            JsonArray candidates = response.body().getAsJsonArray("candidates");
+                            if (candidates != null && candidates.size() > 0) {
+                                JsonObject candidate = candidates.get(0).getAsJsonObject();
+                                JsonObject content = candidate.getAsJsonObject("content");
+                                JsonArray respParts = content != null ? content.getAsJsonArray("parts") : null;
+                                if (respParts != null && respParts.size() > 0) {
+                                    StringBuilder replyBuilder = new StringBuilder();
+                                    String fallbackPartText = null;
+                                    for (int i = 0; i < respParts.size(); i++) {
+                                        JsonObject p = respParts.get(i).getAsJsonObject();
+                                        boolean isThought = p.has("thought") && !p.get("thought").isJsonNull() && p.get("thought").getAsBoolean();
+                                        if (p.has("text") && !p.get("text").isJsonNull()) {
+                                            String txt = p.get("text").getAsString();
+                                            fallbackPartText = txt;
+                                            if (!isThought) {
+                                                replyBuilder.append(txt);
+                                            }
                                         }
                                     }
-                                }
-                                String reply = replyBuilder.toString().trim();
-                                if (reply.isEmpty() && fallbackPartText != null) {
-                                    reply = fallbackPartText.trim();
-                                }
-                                if (!reply.isEmpty()) {
-                                    handleSuccessfulAiReplyWithResult(
-                                            prefs, sbn, notificationWear, packageName, senderKey, senderDisplay,
-                                            incomingMessage, reply, memoryEnabled, notesEnabled, maxTurnsToKeep,
-                                            historySourceLabel, matchedRule, claimToken
-                                    );
-                                    return;
+                                    String reply = replyBuilder.toString().trim();
+                                    if (reply.isEmpty() && fallbackPartText != null) {
+                                        reply = fallbackPartText.trim();
+                                    }
+                                    if (!reply.isEmpty()) {
+                                        handedOffToSuccess = true;
+                                        handleSuccessfulAiReplyWithResultInternal(
+                                                prefs, sbn, notificationWear, packageName, senderKey, senderDisplay,
+                                                incomingMessage, reply, memoryEnabled, notesEnabled, maxTurnsToKeep,
+                                                historySourceLabel, matchedRule, claimToken, permitReleaser
+                                        );
+                                        return;
+                                    }
                                 }
                             }
+                        } catch (Exception e) {
+                            Log.e(TAG, "Error parsing Gemini response (" + e.getClass().getSimpleName() + ")");
                         }
-                    } catch (Exception e) {
-                        Log.e(TAG, "Error parsing Gemini response (" + e.getClass().getSimpleName() + ")");
+                    }
+                    if (serviceDestroyed.get()) {
+                        cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                        return;
+                    }
+                    persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
+                    String err = response.isSuccessful() ? "Empty Gemini response" : formatSafeHttpError(response);
+                    Log.e(TAG, "Gemini API failed: " + err);
+                    recordAiError(prefs, err);
+                    sendActualReply(
+                            sbn,
+                            notificationWear,
+                            fallbackReplyText,
+                            resolveFallbackSourceLabel(matchedRule, historySourceLabel),
+                            ReplySourceType.AI_FALLBACK,
+                            matchedRule,
+                            claimToken
+                    );
+                } finally {
+                    if (!handedOffToSuccess) {
+                        releasePermitSafely(permitReleaser);
                     }
                 }
-                if (serviceDestroyed.get()) {
-                    cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    return;
-                }
-                persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
-                String err = response.isSuccessful() ? "Empty Gemini response" : formatSafeHttpError(response);
-                Log.e(TAG, "Gemini API failed: " + err);
-                recordAiError(prefs, err);
-                sendActualReply(
-                        sbn,
-                        notificationWear,
-                        fallbackReplyText,
-                        resolveFallbackSourceLabel(matchedRule, historySourceLabel),
-                        ReplySourceType.AI_FALLBACK,
-                        matchedRule,
-                        claimToken
-                );
             }
 
             @Override
             public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
-                if (serviceDestroyed.get()) {
-                    Log.d(TAG, "Ignoring late Gemini failure after NotificationService destruction.");
-                    cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    return;
+                try {
+                    if (serviceDestroyed.get()) {
+                        Log.d(TAG, "Ignoring late Gemini failure after NotificationService destruction.");
+                        cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                        return;
+                    }
+                    if (!callbackHandled.compareAndSet(false, true)) {
+                        Log.d(TAG, "Ignoring duplicate Gemini failure callback.");
+                        return;
+                    }
+                    untrackAsyncClaim(claimToken);
+                    persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
+                    Log.e(TAG, "Gemini API network error (" + t.getClass().getSimpleName() + ")");
+                    recordAiError(prefs, "Network error (" + t.getClass().getSimpleName() + ")");
+                    sendActualReply(
+                            sbn,
+                            notificationWear,
+                            fallbackReplyText,
+                            resolveFallbackSourceLabel(matchedRule, historySourceLabel),
+                            ReplySourceType.AI_FALLBACK,
+                            matchedRule,
+                            claimToken
+                    );
+                } finally {
+                    releasePermitSafely(permitReleaser);
                 }
-                if (!callbackHandled.compareAndSet(false, true)) {
-                    Log.d(TAG, "Ignoring duplicate Gemini failure callback.");
-                    return;
-                }
-                untrackAsyncClaim(claimToken);
-                persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
-                Log.e(TAG, "Gemini API network error (" + t.getClass().getSimpleName() + ")");
-                recordAiError(prefs, "Network error (" + t.getClass().getSimpleName() + ")");
-                sendActualReply(
-                        sbn,
-                        notificationWear,
-                        fallbackReplyText,
-                        resolveFallbackSourceLabel(matchedRule, historySourceLabel),
-                        ReplySourceType.AI_FALLBACK,
-                        matchedRule,
-                        claimToken
-                );
             }
         });
     }
@@ -1835,7 +2178,7 @@ public class NotificationService extends NotificationListenerService {
                 prefs, service, baseUrl, apiKey, model, systemPrompt,
                 packageName, senderKey, senderDisplay, incomingMessage, historyAsc,
                 memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
-                sbn, notificationWear, fallbackReplyText, null, null
+                sbn, notificationWear, fallbackReplyText, null, null, null
         );
     }
 
@@ -1848,6 +2191,25 @@ public class NotificationService extends NotificationListenerService {
             String historySourceLabel,
             StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText,
             @Nullable AutoReplyRule matchedRule, @Nullable String claimToken
+    ) {
+        fetchOpenAiCompatibleReplyInternal(
+                prefs, service, baseUrl, apiKey, model, systemPrompt,
+                packageName, senderKey, senderDisplay, incomingMessage, historyAsc,
+                memoryEnabled, notesEnabled, maxTurnsToKeep, historySourceLabel,
+                sbn, notificationWear, fallbackReplyText, matchedRule, claimToken, null
+        );
+    }
+
+    private void fetchOpenAiCompatibleReplyInternal(
+            PreferencesManager prefs, OpenAIService service, String baseUrl, String apiKey,
+            String model, String systemPrompt,
+            String packageName, String senderKey, String senderDisplay,
+            String incomingMessage, List<AiConversationMessage> historyAsc,
+            boolean memoryEnabled, boolean notesEnabled, int maxTurnsToKeep,
+            String historySourceLabel,
+            StatusBarNotification sbn, NotificationWear notificationWear, String fallbackReplyText,
+            @Nullable AutoReplyRule matchedRule, @Nullable String claimToken,
+            @Nullable Runnable permitReleaser
     ) {
         List<Message> messages = AiPromptAndPolicyHelper.buildOpenAiMessages(systemPrompt, historyAsc, incomingMessage);
 
@@ -1865,6 +2227,7 @@ public class NotificationService extends NotificationListenerService {
         final String claimEventKey = NotificationEventKeyBuilder.buildEventKey(sbn, incomingMessage);
         if (serviceDestroyed.get()) {
             cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+            releasePermitSafely(permitReleaser);
             return;
         }
         trackAsyncClaim(claimToken, claimEventKey);
@@ -1872,80 +2235,92 @@ public class NotificationService extends NotificationListenerService {
         service.getChatCompletion(completionsUrl, bearerToken, request).enqueue(new Callback<OpenAIResponse>() {
             @Override
             public void onResponse(@NonNull Call<OpenAIResponse> call, @NonNull Response<OpenAIResponse> response) {
-                if (serviceDestroyed.get()) {
-                    Log.d(TAG, "Ignoring late OpenAI/Compatible response after NotificationService destruction.");
-                    cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    return;
-                }
-                if (!callbackHandled.compareAndSet(false, true)) {
-                    Log.d(TAG, "Ignoring duplicate OpenAI/Compatible response callback.");
-                    return;
-                }
-                untrackAsyncClaim(claimToken);
-                if (response.isSuccessful() && response.body() != null) {
-                    try {
-                        if (response.body().getChoices() != null && !response.body().getChoices().isEmpty() &&
-                                response.body().getChoices().get(0).getMessage() != null &&
-                                response.body().getChoices().get(0).getMessage().getContent() != null) {
+                boolean handedOffToSuccess = false;
+                try {
+                    if (serviceDestroyed.get()) {
+                        Log.d(TAG, "Ignoring late OpenAI/Compatible response after NotificationService destruction.");
+                        cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                        return;
+                    }
+                    if (!callbackHandled.compareAndSet(false, true)) {
+                        Log.d(TAG, "Ignoring duplicate OpenAI/Compatible response callback.");
+                        return;
+                    }
+                    untrackAsyncClaim(claimToken);
+                    if (response.isSuccessful() && response.body() != null) {
+                        try {
+                            if (response.body().getChoices() != null && !response.body().getChoices().isEmpty() &&
+                                    response.body().getChoices().get(0).getMessage() != null &&
+                                    response.body().getChoices().get(0).getMessage().getContent() != null) {
 
-                            String aiReply = response.body().getChoices().get(0).getMessage().getContent().trim();
-                            if (!aiReply.isEmpty()) {
-                                Log.i(TAG, "OpenAI/Compatible successful response received.");
-                                handleSuccessfulAiReplyWithResult(
-                                        prefs, sbn, notificationWear, packageName, senderKey, senderDisplay,
-                                        incomingMessage, aiReply, memoryEnabled, notesEnabled, maxTurnsToKeep,
-                                        historySourceLabel, matchedRule, claimToken
-                                );
-                                return;
+                                String aiReply = response.body().getChoices().get(0).getMessage().getContent().trim();
+                                if (!aiReply.isEmpty()) {
+                                    Log.i(TAG, "OpenAI/Compatible successful response received.");
+                                    handedOffToSuccess = true;
+                                    handleSuccessfulAiReplyWithResultInternal(
+                                            prefs, sbn, notificationWear, packageName, senderKey, senderDisplay,
+                                            incomingMessage, aiReply, memoryEnabled, notesEnabled, maxTurnsToKeep,
+                                            historySourceLabel, matchedRule, claimToken, permitReleaser
+                                    );
+                                    return;
+                                }
                             }
+                        } catch (Exception e) {
+                            Log.e(TAG, "Error parsing OpenAI/Compatible response (" + e.getClass().getSimpleName() + ")");
                         }
-                    } catch (Exception e) {
-                        Log.e(TAG, "Error parsing OpenAI/Compatible response (" + e.getClass().getSimpleName() + ")");
+                    }
+                    if (serviceDestroyed.get()) {
+                        cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                        return;
+                    }
+                    persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
+                    String err = response.isSuccessful() ? "Empty AI response" : formatSafeHttpError(response);
+                    Log.e(TAG, "OpenAI/Compatible API failed: " + err);
+                    recordAiError(prefs, err);
+                    sendActualReply(
+                            sbn,
+                            notificationWear,
+                            fallbackReplyText,
+                            resolveFallbackSourceLabel(matchedRule, historySourceLabel),
+                            ReplySourceType.AI_FALLBACK,
+                            matchedRule,
+                            claimToken
+                    );
+                } finally {
+                    if (!handedOffToSuccess) {
+                        releasePermitSafely(permitReleaser);
                     }
                 }
-                if (serviceDestroyed.get()) {
-                    cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    return;
-                }
-                persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
-                String err = response.isSuccessful() ? "Empty AI response" : formatSafeHttpError(response);
-                Log.e(TAG, "OpenAI/Compatible API failed: " + err);
-                recordAiError(prefs, err);
-                sendActualReply(
-                        sbn,
-                        notificationWear,
-                        fallbackReplyText,
-                        resolveFallbackSourceLabel(matchedRule, historySourceLabel),
-                        ReplySourceType.AI_FALLBACK,
-                        matchedRule,
-                        claimToken
-                );
             }
 
             @Override
             public void onFailure(@NonNull Call<OpenAIResponse> call, @NonNull Throwable t) {
-                if (serviceDestroyed.get()) {
-                    Log.d(TAG, "Ignoring late OpenAI/Compatible failure after NotificationService destruction.");
-                    cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
-                    return;
+                try {
+                    if (serviceDestroyed.get()) {
+                        Log.d(TAG, "Ignoring late OpenAI/Compatible failure after NotificationService destruction.");
+                        cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+                        return;
+                    }
+                    if (!callbackHandled.compareAndSet(false, true)) {
+                        Log.d(TAG, "Ignoring duplicate OpenAI/Compatible failure callback.");
+                        return;
+                    }
+                    untrackAsyncClaim(claimToken);
+                    persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
+                    Log.e(TAG, "OpenAI/Compatible API network error (" + t.getClass().getSimpleName() + ")");
+                    recordAiError(prefs, "Network error (" + t.getClass().getSimpleName() + ")");
+                    sendActualReply(
+                            sbn,
+                            notificationWear,
+                            fallbackReplyText,
+                            resolveFallbackSourceLabel(matchedRule, historySourceLabel),
+                            ReplySourceType.AI_FALLBACK,
+                            matchedRule,
+                            claimToken
+                    );
+                } finally {
+                    releasePermitSafely(permitReleaser);
                 }
-                if (!callbackHandled.compareAndSet(false, true)) {
-                    Log.d(TAG, "Ignoring duplicate OpenAI/Compatible failure callback.");
-                    return;
-                }
-                untrackAsyncClaim(claimToken);
-                persistIncomingUserMessageAsync(sbn, packageName, senderKey, senderDisplay, incomingMessage, memoryEnabled, maxTurnsToKeep);
-                Log.e(TAG, "OpenAI/Compatible API network error (" + t.getClass().getSimpleName() + ")");
-                recordAiError(prefs, "Network error (" + t.getClass().getSimpleName() + ")");
-                sendActualReply(
-                        sbn,
-                        notificationWear,
-                        fallbackReplyText,
-                        resolveFallbackSourceLabel(matchedRule, historySourceLabel),
-                        ReplySourceType.AI_FALLBACK,
-                        matchedRule,
-                        claimToken
-                );
             }
         });
     }
@@ -1973,6 +2348,7 @@ public class NotificationService extends NotificationListenerService {
     @Override
     public void onDestroy() {
         serviceDestroyed.set(true);
+        aiConversationCoordinator.cancelAll();
         List<Map.Entry<String, String>> pendingSnapshot = new ArrayList<>(pendingAsyncClaims.entrySet());
         pendingAsyncClaims.clear();
         for (Map.Entry<String, String> pending : pendingSnapshot) {
@@ -1981,6 +2357,7 @@ public class NotificationService extends NotificationListenerService {
         ReplyExecutionManager managerToShutdown;
         RuleNotificationProcessor processorToShutdown;
         ExecutorService executorToShutdown;
+        ExecutorService postDispatchExecutorToShutdown;
         synchronized (lifecycleLock) {
             managerToShutdown = replyExecutionManager;
             replyExecutionManager = null;
@@ -1991,12 +2368,21 @@ public class NotificationService extends NotificationListenerService {
             ruleNotificationProcessor = null;
             executorToShutdown = aiMemoryExecutor;
             aiMemoryExecutor = null;
+            postDispatchExecutorToShutdown = postDispatchPersistenceExecutor;
+            postDispatchPersistenceExecutor = null;
+            if (postDispatchExecutorToShutdown != null) {
+                lastPostDispatchPersistenceExecutor = postDispatchExecutorToShutdown;
+            }
         }
         if (processorToShutdown != null) {
             processorToShutdown.shutdown();
         }
         if (executorToShutdown != null) {
             executorToShutdown.shutdownNow();
+        }
+        if (postDispatchExecutorToShutdown != null) {
+            // Gracefully drain already-accepted post-dispatch AI memory/notes/log persistence tasks without blocking main thread
+            postDispatchExecutorToShutdown.shutdown();
         }
         super.onDestroy();
     }

@@ -244,6 +244,7 @@ class ReplyHistoryAdapter(
                 ReplyExecutionManager.FAILURE_GENERATED_INTERRUPTED -> R.string.history_note_reason_generated_interrupted
                 ReplyExecutionManager.FAILURE_DISPATCHING_INTERRUPTED -> R.string.history_note_reason_dispatching_interrupted
                 ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR -> R.string.history_note_reason_claim_persistence
+                ReplyExecutionManager.FAILURE_INVALID_ATTEMPT_STATE -> R.string.history_note_reason_invalid_attempt_state
                 else -> if (status == ReplyHistoryStatus.UNKNOWN) {
                     R.string.history_note_unknown_general
                 } else {

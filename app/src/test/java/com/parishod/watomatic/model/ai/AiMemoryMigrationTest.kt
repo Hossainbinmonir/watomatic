@@ -107,7 +107,7 @@ class AiMemoryMigrationTest {
 
         val migratedDb = AiMemoryDatabase.getInstance(context)
         withContext(Dispatchers.IO) {
-            assertEquals(2, migratedDb.openHelper.readableDatabase.version)
+            assertEquals(3, migratedDb.openHelper.readableDatabase.version)
             val dao = migratedDb.aiMemoryDao()
 
             val historyAsc = dao.getRecentMessagesDescSync("com.whatsapp", "alice", 10).asReversed()
@@ -122,6 +122,7 @@ class AiMemoryMigrationTest {
             val notes = dao.observeAllNotes().first()
             assertEquals(1, notes.size)
             assertEquals("Legacy note", notes[0].noteText)
+            assertEquals("alice", notes[0].senderKey)
             assertNull(notes[0].attemptId)
 
             assertEquals(1700000001000L, dao.getLastAiReplyTimeSync("com.whatsapp", "alice"))
@@ -146,10 +147,128 @@ class AiMemoryMigrationTest {
     }
 
     @Test
-    fun `fresh v2 database initializes cleanly and enforces non-destructive version mismatch`() = runBlocking {
+    fun `migration from v2 to v3 backfills sender_key isolates unknown and supports group vs direct notes`() = runBlocking {
+        val dbFile = context.getDatabasePath(AiMemoryDatabase.DB_NAME)
+        dbFile.parentFile?.mkdirs()
+        val sqliteDb = SQLiteDatabase.openOrCreateDatabase(dbFile, null)
+        try {
+            sqliteDb.execSQL(
+                "CREATE TABLE IF NOT EXISTS `ai_conversation_messages` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`package_name` TEXT NOT NULL, " +
+                    "`sender_key` TEXT NOT NULL, " +
+                    "`sender_display_name` TEXT NOT NULL, " +
+                    "`role` TEXT NOT NULL, " +
+                    "`content` TEXT NOT NULL, " +
+                    "`timestamp` INTEGER NOT NULL, " +
+                    "`attempt_id` TEXT, " +
+                    "`incoming_event_key` TEXT, " +
+                    "`execution_status` TEXT NOT NULL DEFAULT 'LEGACY')"
+            )
+            sqliteDb.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_ai_conversation_messages_package_name_sender_key_timestamp` " +
+                    "ON `ai_conversation_messages` (`package_name`, `sender_key`, `timestamp`)"
+            )
+            sqliteDb.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS `index_ai_conversation_messages_attempt_id_role` " +
+                    "ON `ai_conversation_messages` (`attempt_id`, `role`)"
+            )
+            sqliteDb.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS `index_ai_conversation_messages_incoming_event_key` " +
+                    "ON `ai_conversation_messages` (`incoming_event_key`)"
+            )
+            sqliteDb.execSQL(
+                "CREATE TABLE IF NOT EXISTS `ai_notes` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`sender_name` TEXT NOT NULL, " +
+                    "`package_name` TEXT NOT NULL, " +
+                    "`note_text` TEXT NOT NULL, " +
+                    "`source_message` TEXT NOT NULL, " +
+                    "`created_at` INTEGER NOT NULL, " +
+                    "`is_completed` INTEGER NOT NULL, " +
+                    "`attempt_id` TEXT, " +
+                    "`note_dedup_key` TEXT)"
+            )
+            sqliteDb.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_ai_notes_is_completed_created_at` " +
+                    "ON `ai_notes` (`is_completed`, `created_at`)"
+            )
+            sqliteDb.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS `index_ai_notes_attempt_id_note_dedup_key` " +
+                    "ON `ai_notes` (`attempt_id`, `note_dedup_key`)"
+            )
+            sqliteDb.execSQL(
+                "CREATE TABLE IF NOT EXISTS `ai_reply_logs` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`package_name` TEXT NOT NULL, " +
+                    "`sender_key` TEXT NOT NULL, " +
+                    "`replied_at` INTEGER NOT NULL, " +
+                    "`attempt_id` TEXT)"
+            )
+            sqliteDb.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_ai_reply_logs_package_name_sender_key_replied_at` " +
+                    "ON `ai_reply_logs` (`package_name`, `sender_key`, `replied_at`)"
+            )
+            sqliteDb.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS `index_ai_reply_logs_attempt_id` " +
+                    "ON `ai_reply_logs` (`attempt_id`)"
+            )
+
+            sqliteDb.execSQL(
+                "INSERT INTO `ai_notes` (`id`, `sender_name`, `package_name`, `note_text`, `source_message`, `created_at`, `is_completed`, `attempt_id`, `note_dedup_key`) " +
+                    "VALUES (1, '  Sam ', 'com.whatsapp', 'Direct Sam v2 note', 'src1', 1700000001000, 0, 'att-v2-sam', 'k1')"
+            )
+            sqliteDb.execSQL(
+                "INSERT INTO `ai_notes` (`id`, `sender_name`, `package_name`, `note_text`, `source_message`, `created_at`, `is_completed`, `attempt_id`, `note_dedup_key`) " +
+                    "VALUES (2, 'Unknown', 'com.whatsapp', 'Unknown display note', 'src2', 1700000002000, 0, 'att-v2-unk1', 'k2')"
+            )
+            sqliteDb.execSQL(
+                "INSERT INTO `ai_notes` (`id`, `sender_name`, `package_name`, `note_text`, `source_message`, `created_at`, `is_completed`, `attempt_id`, `note_dedup_key`) " +
+                    "VALUES (3, '   ', 'com.whatsapp', 'Blank sender note', 'src3', 1700000003000, 0, NULL, NULL)"
+            )
+            sqliteDb.version = 2
+        } finally {
+            sqliteDb.close()
+        }
+
+        val migratedDb = AiMemoryDatabase.getInstance(context)
+        withContext(Dispatchers.IO) {
+            assertEquals(3, migratedDb.openHelper.readableDatabase.version)
+            val dao = migratedDb.aiMemoryDao()
+            val allNotes = dao.observeAllNotes().first().associateBy { it.id }
+            assertEquals(3, allNotes.size)
+            assertEquals("sam", allNotes[1L]?.senderKey)
+            assertEquals(AiPromptAndPolicyHelper.UNKNOWN_SENDER, allNotes[2L]?.senderKey)
+            assertEquals(AiPromptAndPolicyHelper.UNKNOWN_SENDER, allNotes[3L]?.senderKey)
+
+            // Prompt lookup isolates unknown senders completely
+            assertTrue(dao.getPendingNotesForSenderKeySync("com.whatsapp", AiPromptAndPolicyHelper.UNKNOWN_SENDER, 5).isEmpty())
+            assertEquals(listOf("Direct Sam v2 note"), dao.getPendingNotesForSenderKeySync("com.whatsapp", "sam", 5).map { it.noteText })
+
+            // Group note for "Sam" uses group:sam and does not collide with direct "sam"
+            dao.insertNoteSync(
+                AiNote(
+                    senderName = "Sam",
+                    packageName = "com.whatsapp",
+                    noteText = "Group Sam v3 note",
+                    sourceMessage = "src4",
+                    createdAt = 1700000004000L,
+                    isCompleted = false,
+                    attemptId = "att-v3-group-sam",
+                    noteDedupKey = "k4",
+                    senderKey = AiPromptAndPolicyHelper.normalizeSenderKey("Sam", true)
+                )
+            )
+            assertEquals(listOf("Direct Sam v2 note"), dao.getPendingNotesForSenderKeySync("com.whatsapp", "sam", 5).map { it.noteText })
+            assertEquals(listOf("Group Sam v3 note"), dao.getPendingNotesForSenderKeySync("com.whatsapp", "group:sam", 5).map { it.noteText })
+        }
+    }
+
+    @Test
+    fun `fresh v3 database initializes cleanly and enforces non-destructive version mismatch`() = runBlocking {
         val db = AiMemoryDatabase.getInstance(context)
         withContext(Dispatchers.IO) {
-            assertEquals(2, db.openHelper.writableDatabase.version)
+            assertEquals(3, db.openHelper.writableDatabase.version)
             assertEquals(0, db.aiMemoryDao().getConversationMessageCountSync())
             assertEquals(0, db.aiMemoryDao().getTotalNoteCountSync())
         }

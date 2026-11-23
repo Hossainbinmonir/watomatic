@@ -31,6 +31,7 @@ import com.google.gson.JsonElement
 import com.parishod.watomatic.R
 import com.parishod.watomatic.activity.notes.AiNotesActivity
 import com.parishod.watomatic.model.ai.AiMemoryDatabase
+import com.parishod.watomatic.model.ai.AiMemoryRepository
 import com.parishod.watomatic.model.preferences.PreferencesManager
 import com.parishod.watomatic.model.utils.Constants
 import com.parishod.watomatic.model.utils.Constants.CUSTOM_AI_PROVIDER_NAME
@@ -360,17 +361,23 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
 
     private fun refreshMemoryAndNotesCounters() {
         lifecycleScope.launch {
-            val (pendingNotes, msgCount) = withContext(Dispatchers.IO) {
+            val counts = withContext(Dispatchers.IO) {
                 val dao = AiMemoryDatabase.getInstance(applicationContext).aiMemoryDao()
-                dao.getPendingNoteCountSync() to dao.getConversationMessageCountSync()
+                Triple(
+                    dao.getPendingNoteCountSync(),
+                    dao.getConversationMessageCountSync(),
+                    dao.getAiGeneratedNoteCountSync()
+                )
             }
+            val (pendingNotes, msgCount, aiNoteCount) = counts
+            val clearableCount = msgCount + aiNoteCount
             btnViewAiNotes.text = getString(R.string.ai_view_notes_btn, pendingNotes)
-            btnClearAiMemory.text = if (msgCount > 0) {
-                getString(R.string.ai_clear_memory_count_btn, msgCount)
+            btnClearAiMemory.text = if (clearableCount > 0) {
+                getString(R.string.ai_clear_memory_count_btn, clearableCount)
             } else {
                 getString(R.string.ai_clear_memory_btn)
             }
-            btnClearAiMemory.isEnabled = msgCount > 0
+            btnClearAiMemory.isEnabled = clearableCount > 0
         }
     }
 
@@ -458,8 +465,9 @@ class OtherAiConfigurationActivity : AppCompatActivity() {
                 .setPositiveButton(R.string.ai_clear_memory_btn) { _, _ ->
                     lifecycleScope.launch {
                         withContext(Dispatchers.IO) {
-                            AiMemoryDatabase.getInstance(applicationContext).aiMemoryDao()
-                                .clearAllConversationMessages()
+                            AiMemoryRepository(
+                                AiMemoryDatabase.getInstance(applicationContext).aiMemoryDao()
+                            ).clearConversationMemoryAndAiNotes()
                         }
                         refreshMemoryAndNotesCounters()
                         Toast.makeText(this@OtherAiConfigurationActivity, R.string.ai_memory_cleared_toast, Toast.LENGTH_SHORT).show()

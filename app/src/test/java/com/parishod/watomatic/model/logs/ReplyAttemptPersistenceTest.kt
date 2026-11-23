@@ -139,6 +139,44 @@ class ReplyAttemptPersistenceTest {
     }
 
     @Test
+    fun `fromTransition sets dispatchAttempted false for GENERATED and true for DISPATCHING consistently with claim`() = runBlocking {
+        val sbn = buildSbn(sender = "Frank", message = "Transition test")
+        val eventKey = "evt-transition-consistency"
+        val generatedAttempt = ReplyAttempt(
+            attemptId = "attempt-transition-1",
+            sourceType = ReplySourceType.DEFAULT,
+            sourceLabel = "Default",
+            packageName = "com.whatsapp",
+            notificationKey = sbn.key,
+            replyText = "Reply",
+            status = ReplyExecutionStatus.GENERATED,
+            createdAtMs = 1_000L,
+            updatedAtMs = 1_000L,
+            eventKey = eventKey
+        )
+        val generatedEntity = ReplyAttemptEntity.fromTransition(generatedAttempt, "Frank", "Transition test")
+        assertFalse(generatedEntity.dispatchAttempted)
+        assertFalse(generatedEntity.dispatchedNormally)
+
+        val dispatchingAttempt = generatedAttempt.transitionTo(ReplyExecutionStatus.DISPATCHING, 1_100L)
+        val dispatchingEntity = ReplyAttemptEntity.fromTransition(dispatchingAttempt, "Frank", "Transition test")
+        assertTrue(dispatchingEntity.dispatchAttempted)
+        assertFalse(dispatchingEntity.dispatchedNormally)
+
+        // Verify persisted DB state and claim transition stay consistent
+        dbUtils.tryAcquireNotificationClaim(eventKey, generatedAttempt.attemptId, "com.whatsapp", "frank", sbn.key, 1_000L, false)
+        dbUtils.recordAttemptTransition(generatedAttempt, "Frank", "Transition test")
+        dbUtils.updateNotificationClaimTransition(eventKey, generatedAttempt.attemptId, generatedAttempt.attemptId, ReplyExecutionStatus.GENERATED, 1_000L)
+        assertFalse(dbUtils.getAttemptById(generatedAttempt.attemptId)!!.dispatchAttempted)
+        assertFalse(dbUtils.getNotificationClaim(eventKey)!!.dispatchAttempted)
+
+        dbUtils.recordAttemptTransition(dispatchingAttempt, "Frank", "Transition test")
+        dbUtils.updateNotificationClaimTransition(eventKey, generatedAttempt.attemptId, dispatchingAttempt.attemptId, ReplyExecutionStatus.DISPATCHING, 1_100L)
+        assertTrue(dbUtils.getAttemptById(generatedAttempt.attemptId)!!.dispatchAttempted)
+        assertTrue(dbUtils.getNotificationClaim(eventKey)!!.dispatchAttempted)
+    }
+
+    @Test
     fun `FAILED attempt is persisted with safe category and never counted as sent or grouped`() = runBlocking {
         val sbn = buildSbn(sender = "Bob", message = "Ping")
         val attempt = ReplyAttempt.create(
@@ -421,5 +459,178 @@ class ReplyAttemptPersistenceTest {
         waitUntil { recycler.adapter?.itemCount == 0 }
         assertEquals(0, recycler.adapter!!.itemCount)
         assertEquals(2L, dbUtils.numReplies)
+    }
+
+    @Test
+    fun `terminal attempts reject all terminal-to-terminal and terminal-to-non-terminal overwrites`() {
+        val attemptDao = db.replyAttemptDao()
+        val terminalStatuses = listOf(
+            ReplyExecutionStatus.DISPATCHED,
+            ReplyExecutionStatus.FAILED,
+            ReplyExecutionStatus.CANCELLED,
+            ReplyExecutionStatus.UNKNOWN
+        )
+        val allStatuses = listOf(
+            ReplyExecutionStatus.GENERATED,
+            ReplyExecutionStatus.DISPATCHING,
+            ReplyExecutionStatus.DISPATCHED,
+            ReplyExecutionStatus.FAILED,
+            ReplyExecutionStatus.CANCELLED,
+            ReplyExecutionStatus.UNKNOWN
+        )
+
+        for (initialStatus in terminalStatuses) {
+            for (incomingStatus in allStatuses) {
+                val id = "immut-${initialStatus.name}-${incomingStatus.name}"
+                val initialCategory = when (initialStatus) {
+                    ReplyExecutionStatus.DISPATCHED -> null
+                    ReplyExecutionStatus.FAILED -> ReplyExecutionManager.FAILURE_MISSING_PENDING_INTENT
+                    ReplyExecutionStatus.CANCELLED -> ReplyExecutionManager.FAILURE_PENDING_INTENT_CANCELED
+                    ReplyExecutionStatus.UNKNOWN -> ReplyExecutionManager.FAILURE_AMBIGUOUS_SEND_EXCEPTION
+                    else -> null
+                }
+                val initialDispatchAttempted = initialStatus != ReplyExecutionStatus.FAILED
+                val initialDispatchedNormally = initialStatus == ReplyExecutionStatus.DISPATCHED
+
+                attemptDao.upsertAttemptSafely(
+                    ReplyAttemptEntity(
+                        attemptId = id,
+                        packageName = "com.whatsapp",
+                        senderName = "Alice",
+                        incomingMessage = "Hi",
+                        notificationKey = "nk-$id",
+                        replyText = "Original reply",
+                        sourceType = ReplySourceType.DEFAULT.name,
+                        sourceLabel = "Default",
+                        status = initialStatus.name,
+                        dispatchAttempted = initialDispatchAttempted,
+                        dispatchedNormally = initialDispatchedNormally,
+                        failureCategory = initialCategory,
+                        createdAtMs = 1_000L,
+                        updatedAtMs = 2_000L,
+                        eventKey = "evt-$id"
+                    )
+                )
+
+                // Attempt conflicting overwrite with altered status, timestamps, and failureCategory
+                attemptDao.upsertAttemptSafely(
+                    ReplyAttemptEntity(
+                        attemptId = id,
+                        packageName = "com.whatsapp",
+                        senderName = "Alice",
+                        incomingMessage = "Hi",
+                        notificationKey = "nk-$id",
+                        replyText = "Overwritten reply",
+                        sourceType = ReplySourceType.DEFAULT.name,
+                        sourceLabel = "Default",
+                        status = incomingStatus.name,
+                        dispatchAttempted = incomingStatus == ReplyExecutionStatus.DISPATCHED,
+                        dispatchedNormally = incomingStatus == ReplyExecutionStatus.DISPATCHED,
+                        failureCategory = ReplyExecutionManager.FAILURE_INVALID_ATTEMPT_STATE,
+                        createdAtMs = 999L,
+                        updatedAtMs = 9_999L,
+                        eventKey = "evt-$id"
+                    )
+                )
+
+                val stored = attemptDao.getAttemptByIdSync(id)!!
+                assertEquals("Initial $initialStatus must ignore $incomingStatus", initialStatus.name, stored.status)
+                assertEquals("Original reply", stored.replyText)
+                assertEquals(initialDispatchAttempted, stored.dispatchAttempted)
+                assertEquals(initialDispatchedNormally, stored.dispatchedNormally)
+                assertEquals(initialCategory, stored.failureCategory)
+                assertEquals(2_000L, stored.updatedAtMs)
+            }
+        }
+    }
+
+    @Test
+    fun `DISPATCHING attempt ignores stale GENERATED regression and preserves dispatchAttempted`() {
+        val attemptDao = db.replyAttemptDao()
+        val id = "no-regress-dispatching"
+        attemptDao.upsertAttemptSafely(
+            ReplyAttemptEntity(
+                attemptId = id,
+                packageName = "com.whatsapp",
+                senderName = "Bob",
+                incomingMessage = "Ping",
+                notificationKey = "nk-$id",
+                replyText = "Pong",
+                sourceType = ReplySourceType.DEFAULT.name,
+                sourceLabel = "Default",
+                status = ReplyExecutionStatus.DISPATCHING.name,
+                dispatchAttempted = true,
+                dispatchedNormally = false,
+                failureCategory = null,
+                createdAtMs = 1_000L,
+                updatedAtMs = 1_500L,
+                eventKey = "evt-$id"
+            )
+        )
+
+        attemptDao.upsertAttemptSafely(
+            ReplyAttemptEntity(
+                attemptId = id,
+                packageName = "com.whatsapp",
+                senderName = "Bob",
+                incomingMessage = "Ping",
+                notificationKey = "nk-$id",
+                replyText = "Pong",
+                sourceType = ReplySourceType.DEFAULT.name,
+                sourceLabel = "Default",
+                status = ReplyExecutionStatus.GENERATED.name,
+                dispatchAttempted = false,
+                dispatchedNormally = false,
+                failureCategory = null,
+                createdAtMs = 1_000L,
+                updatedAtMs = 1_600L,
+                eventKey = "evt-$id"
+            )
+        )
+
+        val stored = attemptDao.getAttemptByIdSync(id)!!
+        assertEquals(ReplyExecutionStatus.DISPATCHING.name, stored.status)
+        assertTrue(stored.dispatchAttempted)
+        assertEquals(1_500L, stored.updatedAtMs)
+    }
+
+    @Test
+    fun `duplicate recordAttemptResult calls create single MessageLog and locked terminal attempt blocks MessageLog insertion`() {
+        val sbn = buildSbn(sender = "Zoe", message = "Dup log check")
+        val attempt = ReplyAttempt.create(
+            ReplySourceType.DEFAULT, "Default", "com.whatsapp", sbn.key, "Reply once", "evt-dup-log"
+        )
+        val dispatched = ReplyExecutionResult(
+            attempt.attemptId, ReplyExecutionStatus.DISPATCHED, true, true, null, "ok", 5_000L
+        )
+        dbUtils.recordAttemptResult(attempt, dispatched, "Zoe", "Dup log check", sbn)
+        dbUtils.recordAttemptResult(attempt, dispatched, "Zoe", "Dup log check", sbn)
+
+        assertEquals(1, db.logsDao().countByAttemptIdSync(attempt.attemptId))
+        assertEquals(1L, dbUtils.numReplies)
+
+        // If an attempt is already UNKNOWN, subsequent DISPATCHED recordAttemptResult must NOT create a MessageLog
+        val lockedSbn = buildSbn(sender = "Zoe", message = "Locked check", whenMs = 1_700_000_005_000L)
+        val lockedAttempt = ReplyAttempt.create(
+            ReplySourceType.DEFAULT, "Default", "com.whatsapp", lockedSbn.key, "Reply?", "evt-locked-log"
+        )
+        val unknown = ReplyExecutionResult(
+            lockedAttempt.attemptId,
+            ReplyExecutionStatus.UNKNOWN,
+            true,
+            false,
+            ReplyExecutionManager.FAILURE_AMBIGUOUS_SEND_EXCEPTION,
+            "ambiguous",
+            6_000L
+        )
+        dbUtils.recordAttemptResult(lockedAttempt, unknown, "Zoe", "Locked check", lockedSbn)
+        val forgedDispatched = ReplyExecutionResult(
+            lockedAttempt.attemptId, ReplyExecutionStatus.DISPATCHED, true, true, null, "forged", 7_000L
+        )
+        dbUtils.recordAttemptResult(lockedAttempt, forgedDispatched, "Zoe", "Locked check", lockedSbn)
+
+        assertEquals(ReplyExecutionStatus.UNKNOWN.name, dbUtils.getAttemptById(lockedAttempt.attemptId)!!.status)
+        assertEquals(0, db.logsDao().countByAttemptIdSync(lockedAttempt.attemptId))
+        assertEquals(1L, dbUtils.numReplies)
     }
 }

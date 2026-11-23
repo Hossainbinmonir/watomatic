@@ -213,4 +213,88 @@ class DbUtilsTest {
             pool.shutdownNow()
         }
     }
+
+    @Test
+    fun `purgeExpiredHistory removes 30-day expired resolved attempts and logs while protecting active and UNKNOWN states`() {
+        val db = MessageLogsDB.getInstance(context)
+        val attemptDao = db.replyAttemptDao()
+        val nowMs = 1_800_000_000_000L
+        val cutoffMs = nowMs - DbUtils.HISTORY_RETENTION_MS
+
+        fun insertAttempt(id: String, status: String, updatedAtMs: Long) {
+            attemptDao.upsertAttemptSafely(
+                com.parishod.watomatic.model.logs.ReplyAttemptEntity(
+                    attemptId = id,
+                    packageName = "com.whatsapp",
+                    senderName = "Sender-$id",
+                    incomingMessage = "Msg-$id",
+                    notificationKey = "nk-$id",
+                    replyText = "Reply-$id",
+                    sourceType = ReplySourceType.DEFAULT.name,
+                    sourceLabel = "Default",
+                    status = status,
+                    dispatchAttempted = status == "DISPATCHED" || status == "DISPATCHING" || status == "UNKNOWN",
+                    dispatchedNormally = status == "DISPATCHED",
+                    failureCategory = null,
+                    createdAtMs = updatedAtMs - 100L,
+                    updatedAtMs = updatedAtMs,
+                    eventKey = "evt-$id"
+                )
+            )
+        }
+
+        db.appPackageDao().insertAppPackage(AppPackage("com.whatsapp"))
+        val pkgIdx = db.appPackageDao().getPackageIndex("com.whatsapp")
+
+        // Exact boundary & expired resolved attempts (MUST be purged along with matching message_logs)
+        insertAttempt("att-disp-boundary", "DISPATCHED", cutoffMs)
+        db.logsDao().logReply(
+            MessageLog(pkgIdx, "S1", "M1", cutoffMs, "R1", null, cutoffMs, ReplyHistoryStatus.DISPATCHED, "att-disp-boundary")
+        )
+        insertAttempt("att-fail-old", "FAILED", cutoffMs - 5_000L)
+        insertAttempt("att-canc-old", "CANCELLED", cutoffMs - 10_000L)
+
+        // Just inside retention window (cutoffMs + 1) -> MUST be retained across both tables
+        insertAttempt("att-disp-recent", "DISPATCHED", cutoffMs + 1L)
+        db.logsDao().logReply(
+            MessageLog(pkgIdx, "S2", "M2", cutoffMs + 1L, "R2", null, cutoffMs + 1L, ReplyHistoryStatus.DISPATCHED, "att-disp-recent")
+        )
+        insertAttempt("att-fail-recent", "FAILED", cutoffMs + 1L)
+
+        // Old unresolved/active/UNKNOWN states -> MUST NEVER be deleted merely due to age
+        insertAttempt("att-claimed-old", "CLAIMED", cutoffMs - 100_000L)
+        insertAttempt("att-gen-old", "GENERATED", cutoffMs - 100_000L)
+        insertAttempt("att-dispatching-old", "DISPATCHING", cutoffMs - 100_000L)
+        insertAttempt("att-unknown-old", "UNKNOWN", cutoffMs - 100_000L)
+
+        // Active claim must remain untouched by history retention purge
+        assertTrue(
+            dbUtils.tryAcquireNotificationClaim(
+                "evt-keep-claim", "att-disp-boundary", "com.whatsapp", "s1", "nk-1", cutoffMs, false
+            ).acquired
+        )
+
+        dbUtils.purgeExpiredHistory(nowMs)
+
+        // Purged expired resolved
+        assertEquals(null, dbUtils.getAttemptById("att-disp-boundary"))
+        assertEquals(null, dbUtils.getAttemptById("att-fail-old"))
+        assertEquals(null, dbUtils.getAttemptById("att-canc-old"))
+        assertEquals(0, db.logsDao().countByAttemptIdSync("att-disp-boundary"))
+
+        // Retained recent resolved (Timeline & Grouped stay consistent)
+        assertNotNull(dbUtils.getAttemptById("att-disp-recent"))
+        assertEquals(1, db.logsDao().countByAttemptIdSync("att-disp-recent"))
+        assertEquals(1L, dbUtils.getNumReplies())
+        assertNotNull(dbUtils.getAttemptById("att-fail-recent"))
+
+        // Protected unresolved / active / UNKNOWN states regardless of age
+        assertNotNull(dbUtils.getAttemptById("att-claimed-old"))
+        assertNotNull(dbUtils.getAttemptById("att-gen-old"))
+        assertNotNull(dbUtils.getAttemptById("att-dispatching-old"))
+        assertNotNull(dbUtils.getAttemptById("att-unknown-old"))
+
+        // Claims preserved
+        assertNotNull(dbUtils.getNotificationClaim("evt-keep-claim"))
+    }
 }

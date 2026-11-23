@@ -9,7 +9,8 @@ import androidx.room.PrimaryKey
     tableName = "ai_notes",
     indices = [
         Index(value = ["is_completed", "created_at"]),
-        Index(value = ["attempt_id", "note_dedup_key"], unique = true)
+        Index(value = ["attempt_id", "note_dedup_key"], unique = true),
+        Index(value = ["package_name", "sender_key", "is_completed"])
     ]
 )
 data class AiNote(
@@ -38,7 +39,10 @@ data class AiNote(
     val attemptId: String? = null,
 
     @ColumnInfo(name = "note_dedup_key")
-    val noteDedupKey: String? = null
+    val noteDedupKey: String? = null,
+
+    @ColumnInfo(name = "sender_key", defaultValue = "")
+    val senderKey: String = ""
 ) {
     @androidx.room.Ignore
     constructor(
@@ -58,6 +62,7 @@ data class AiNote(
         createdAt = createdAt,
         isCompleted = isCompleted,
         attemptId = null,
-        noteDedupKey = null
+        noteDedupKey = null,
+        senderKey = ""
     )
 }

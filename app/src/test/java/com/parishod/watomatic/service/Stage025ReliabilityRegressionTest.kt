@@ -587,7 +587,8 @@ class Stage025ReliabilityRegressionTest {
             ReplyExecutionManager.FAILURE_UNKNOWN_OUTCOME_LOCKED,
             ReplyExecutionManager.FAILURE_GENERATED_INTERRUPTED,
             ReplyExecutionManager.FAILURE_DISPATCHING_INTERRUPTED,
-            ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR
+            ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR,
+            ReplyExecutionManager.FAILURE_INVALID_ATTEMPT_STATE
         )
         for (category in categories) {
             val resId = ReplyHistoryAdapter.safeStatusNoteResFor(ReplyExecutionStatus.UNKNOWN.name, category)
@@ -595,6 +596,13 @@ class Stage025ReliabilityRegressionTest {
             val resolved = context.getString(resId!!)
             assertTrue(resolved.isNotBlank())
         }
+        assertEquals(
+            com.parishod.watomatic.R.string.history_note_reason_invalid_attempt_state,
+            ReplyHistoryAdapter.safeStatusNoteResFor(
+                ReplyExecutionStatus.FAILED.name,
+                ReplyExecutionManager.FAILURE_INVALID_ATTEMPT_STATE
+            )
+        )
     }
 
     @Test

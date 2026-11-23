@@ -90,7 +90,7 @@ class ReplyExecutionManager @JvmOverloads constructor(
             return cancelForShutdown(currentAttempt, transitionListener)
         }
 
-        if (currentAttempt.replyText == null) {
+        if (currentAttempt.replyText.isNullOrBlank()) {
             currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.FAILED, clock())
             notifyTransition(transitionListener, currentAttempt)
             return ReplyExecutionResult(
@@ -99,7 +99,7 @@ class ReplyExecutionManager @JvmOverloads constructor(
                 dispatchAttempted = false,
                 dispatchedNormally = false,
                 failureCategory = FAILURE_INVALID_REPLY_TEXT,
-                diagnosticMessage = "Reply text is null",
+                diagnosticMessage = "Reply text is null or blank",
                 timestampMs = currentAttempt.updatedAtMs
             )
         }
@@ -150,6 +150,19 @@ class ReplyExecutionManager @JvmOverloads constructor(
         }
 
         val lockKey = resolveCoordinationKey(currentAttempt, notificationWear)
+        if (lockKey == null) {
+            currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.FAILED, clock())
+            notifyTransition(transitionListener, currentAttempt)
+            return ReplyExecutionResult(
+                executionId = currentAttempt.attemptId,
+                status = ReplyExecutionStatus.FAILED,
+                dispatchAttempted = false,
+                dispatchedNormally = false,
+                failureCategory = FAILURE_MISSING_WEAR_DATA,
+                diagnosticMessage = "Missing stable notification coordination key",
+                timestampMs = currentAttempt.updatedAtMs
+            )
+        }
         val ownerToken = currentAttempt.attemptId
         var shutDownBeforeLock = false
         var lockAcquired = false
@@ -209,8 +222,9 @@ class ReplyExecutionManager @JvmOverloads constructor(
                 }
             }
 
-            // Coordinate shutdown and dispatch-start atomically without holding a global
-            // lock across transition listeners or PendingIntent.send().
+            // Perform the final shutdown gate before emitting DISPATCHING so a pre-dispatch
+            // shutdown cancellation never leaves a persisted DISPATCHING / dispatch_attempted
+            // transition in storage or history. No lock is held across listeners or IPC.
             if (isShutDown()) {
                 return cancelForShutdown(currentAttempt, transitionListener)
             }
@@ -218,12 +232,9 @@ class ReplyExecutionManager @JvmOverloads constructor(
             currentAttempt = currentAttempt.transitionTo(ReplyExecutionStatus.DISPATCHING, clock())
             notifyTransition(transitionListener, currentAttempt)
 
-            if (isShutDown()) {
-                return cancelForShutdown(currentAttempt, transitionListener)
-            }
-
-            // Isolate PendingIntent dispatch from transition listener callbacks so listener
-            // exceptions can never corrupt or reclassify the authoritative dispatch outcome.
+            // Intentionally catch Exception only (not Error/Throwable) so fatal JVM errors
+            // such as OutOfMemoryError or StackOverflowError are never concealed; the outer
+            // finally block still guarantees inFlightKeys release.
             val dispatchError: Exception? = try {
                 pendingIntentSender.send(appContext, pendingIntent, localIntent)
                 null
@@ -340,16 +351,20 @@ class ReplyExecutionManager @JvmOverloads constructor(
     private fun resolveCoordinationKey(
         attempt: ReplyAttempt,
         notificationWear: NotificationWear
-    ): String {
+    ): String? {
         val notifKey = attempt.notificationKey?.trim()
         if (!notifKey.isNullOrEmpty()) {
             return "notif:$notifKey"
+        }
+        val eventKey = attempt.eventKey?.trim()
+        if (!eventKey.isNullOrEmpty()) {
+            return "event:$eventKey"
         }
         val wearId = notificationWear.id.trim()
         if (wearId.isNotEmpty()) {
             return "wear:$wearId"
         }
-        return "attempt:${attempt.attemptId}"
+        return null
     }
 
     private fun notifyTransition(

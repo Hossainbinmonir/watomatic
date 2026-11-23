@@ -658,7 +658,7 @@
     <string name="history_source_ai">AI Reply</string>
     <string name="history_clear_all">Clear All</string>
     <string name="history_clear_title">Clear Reply History?</string>
-    <string name="history_clear_message">Are you sure you want to delete all recorded reply history? This action cannot be undone.</string>
+    <string name="history_clear_message">Are you sure you want to delete all recorded reply history? AI conversation memory, saved notes, and active rate limits are stored separately and will not be cleared. This action cannot be undone.</string>
     <string name="history_cleared_toast">Reply history cleared</string>
     <string name="history_delete_entry">Delete history entry</string>
     <string name="empty_history_title">No Reply History Yet</string>
@@ -709,8 +709,8 @@
     <string name="ai_clear_memory_btn">Clear Chat Memory</string>
     <string name="ai_clear_memory_count_btn">Clear Memory (%1$d)</string>
     <string name="ai_clear_memory_title">Clear AI Conversation Memory?</string>
-    <string name="ai_clear_memory_message">This deletes all remembered chat history across contacts. Saved Notes &amp; Reminders will be kept.</string>
-    <string name="ai_memory_cleared_toast">AI conversation memory cleared</string>
+    <string name="ai_clear_memory_message">This deletes all remembered AI chat history and AI-extracted notes across contacts. Manual reminders and reply cooldown/frequency limits will be kept.</string>
+    <string name="ai_memory_cleared_toast">AI conversation memory and AI notes cleared</string>
 
     <string name="ai_section_rules_title">AI Reply Rules &amp; Limits</string>
     <string name="ai_section_rules_subtitle">Control how often and to whom AI responds automatically.</string>
@@ -826,5 +826,6 @@
     <string name="history_note_reason_generated_interrupted">Cancelled because the service restarted before dispatch started.</string>
     <string name="history_note_reason_dispatching_interrupted">Outcome uncertain because the service restarted during dispatch; not retried.</string>
     <string name="history_note_reason_claim_persistence">Failed because reply tracking storage was unavailable; not retried.</string>
+    <string name="history_note_reason_invalid_attempt_state">Failed because the reply attempt was no longer in an executable state.</string>
     <string name="history_note_reason_unclassified">Execution did not complete successfully.</string>
 </resources>

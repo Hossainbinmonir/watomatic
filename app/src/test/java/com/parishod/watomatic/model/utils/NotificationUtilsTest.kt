@@ -223,6 +223,27 @@ class NotificationUtilsTest {
         assertEquals("Family Group(1 message)", title)
     }
 
+    @Test
+    fun `getTitle preserves legitimate parentheses in group names when multiple messages exist`() {
+        fun groupTitleWithMultipleMessages(rawTitle: String, hiddenTitle: String? = null): String? {
+            val extras = Bundle().apply {
+                putBoolean("android.isGroupConversation", true)
+                putString("android.hiddenConversationTitle", hiddenTitle)
+                putString("android.title", rawTitle)
+                putParcelableArray("android.messages", arrayOfNulls<Parcelable>(3))
+            }
+            val notification = Notification().apply { this.extras = extras }
+            whenever(mockSbn.notification).thenReturn(notification)
+            return NotificationUtils.getTitle(mockSbn)
+        }
+
+        assertEquals("Project (Alpha)", groupTitleWithMultipleMessages("Project (Alpha): John"))
+        assertEquals("Project (Alpha)", groupTitleWithMultipleMessages("Project (Alpha) (3 messages): John"))
+        assertEquals("Team (A) (B)", groupTitleWithMultipleMessages("Team (A) (B)", hiddenTitle = "Team (A) (B)"))
+        assertEquals("Family Group", groupTitleWithMultipleMessages("Family Group (4+)"))
+        assertNull(NotificationUtils.getTitle(null))
+    }
+
     // --- extractWearNotification ---
 
     @Test

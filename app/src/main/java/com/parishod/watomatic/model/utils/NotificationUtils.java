@@ -21,19 +21,26 @@ import com.parishod.watomatic.R;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 public class NotificationUtils {
     // Do not reply to notifications whose timestamp is older than 2 minutes
     private final static int MAX_OLD_NOTIFICATION_CAN_BE_REPLIED_TIME_MS = 2 * 60 * 1000;
+    private static final Pattern GROUP_MESSAGE_COUNT_SUFFIX_PATTERN =
+            Pattern.compile("\\s*\\(\\s*\\d+(?:\\+|\\s+[^()]+)?\\s*\\)\\s*$");
 
     public static String getTitle(StatusBarNotification sbn) {
+        if (sbn == null || sbn.getNotification() == null || sbn.getNotification().extras == null) {
+            return null;
+        }
+        android.os.Bundle extras = sbn.getNotification().extras;
         String title;
-        if (sbn.getNotification().extras.getBoolean("android.isGroupConversation")) {
-            title = sbn.getNotification().extras.getString("android.hiddenConversationTitle");
+        if (extras.getBoolean("android.isGroupConversation", false)) {
+            title = extras.getString("android.hiddenConversationTitle");
             //Just to avoid null cases, if by any chance hiddenConversationTitle comes null for group message
             // then extract group name from title
             if (title == null) {
-                title = sbn.getNotification().extras.getString("android.title");
+                title = extras.getString("android.title");
                 if (title == null) {
                     return null;
                 }
@@ -43,17 +50,18 @@ public class NotificationUtils {
                 }
             }
 
-            //To eliminate the case where group title has number of messages count in it
-            Object messagesObj = sbn.getNotification().extras.get("android.messages");
+            // Strip only a trailing notification-generated message/member count suffix when multiple messages exist,
+            // preserving legitimate parentheses inside group names such as "Project (Alpha)".
+            Object messagesObj = extras.get("android.messages");
             Parcelable[] b = (messagesObj instanceof Parcelable[]) ? (Parcelable[]) messagesObj : null;
             if (b != null && b.length > 1) {
-                int startIndex = title.lastIndexOf('(');
-                if (startIndex != -1) {
-                    title = title.substring(0, startIndex);
+                String stripped = GROUP_MESSAGE_COUNT_SUFFIX_PATTERN.matcher(title).replaceFirst("");
+                if (!stripped.trim().isEmpty()) {
+                    title = stripped;
                 }
             }
         } else {
-            title = sbn.getNotification().extras.getString("android.title");
+            title = extras.getString("android.title");
         }
         return title;
     }

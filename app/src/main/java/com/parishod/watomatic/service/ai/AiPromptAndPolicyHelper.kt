@@ -1,10 +1,12 @@
 package com.parishod.watomatic.service.ai
 
+import android.service.notification.StatusBarNotification
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.parishod.watomatic.model.ai.AiConversationMessage
 import com.parishod.watomatic.model.ai.AiNote
 import com.parishod.watomatic.network.model.openai.Message
+import com.parishod.watomatic.service.reply.NotificationEventKeyBuilder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -26,6 +28,8 @@ object AiPromptAndPolicyHelper {
     const val DEFAULT_NOTE_CONFIRMATION = "Noted! I have saved this reminder."
 
     private val SAVE_NOTE_REGEX = Regex("(?is)\\[\\[\\s*SAVE_NOTE\\s*:\\s*(.*?)\\s*(?:\\]\\])+")
+    private val UNCLOSED_SAVE_NOTE_REGEX = Regex("(?is)\\[\\[\\s*SAVE_NOTE\\s*:.*$")
+    private val MALFORMED_SINGLE_BRACKET_SAVE_NOTE_REGEX = Regex("(?is)\\[\\s*SAVE_NOTE\\s*:[^\\]]*(?:\\]|$)")
     private val ANY_HIDDEN_MARKER_REGEX = Regex("(?is)\\[\\[.*?\\]\\]")
     private val UNCLOSED_HIDDEN_MARKER_REGEX = Regex("(?is)\\[\\[.*$")
     private val TRAILING_BLANK_LINES = Regex("\n{3,}")
@@ -37,9 +41,16 @@ object AiPromptAndPolicyHelper {
     )
 
     @JvmStatic
-    fun normalizeSenderKey(senderName: String?): String {
+    @JvmOverloads
+    fun normalizeSenderKey(senderName: String?, isGroup: Boolean = false): String {
         val trimmed = senderName?.trim()?.lowercase(Locale.ROOT).orEmpty()
-        return trimmed.ifEmpty { UNKNOWN_SENDER }
+        if (trimmed.isEmpty()) return UNKNOWN_SENDER
+        return if (isGroup) "group:$trimmed" else trimmed
+    }
+
+    @JvmStatic
+    fun isUnknownSender(senderKey: String?): Boolean {
+        return senderKey.isNullOrBlank() || senderKey == UNKNOWN_SENDER
     }
 
     @JvmStatic
@@ -64,7 +75,16 @@ object AiPromptAndPolicyHelper {
     }
 
     @JvmStatic
+    @JvmOverloads
     fun buildIncomingEventKey(
+        sbn: StatusBarNotification?,
+        fallbackIncomingMessage: String? = null
+    ): String? {
+        return NotificationEventKeyBuilder.buildEventKey(sbn, fallbackIncomingMessage)
+    }
+
+    @JvmStatic
+    fun buildLegacyIncomingEventKey(
         sbnKey: String?,
         postTimeMs: Long,
         whenMs: Long,
@@ -74,6 +94,25 @@ object AiPromptAndPolicyHelper {
     ): String {
         val raw = "${sbnKey.orEmpty()}|$postTimeMs|$whenMs|$packageName|$senderKey|${incomingMessage.trim()}"
         return "in_${sha256Hex(raw)}"
+    }
+
+    @JvmStatic
+    fun buildIncomingEventKey(
+        sbnKey: String?,
+        postTimeMs: Long,
+        whenMs: Long,
+        packageName: String,
+        senderKey: String,
+        incomingMessage: String
+    ): String {
+        return buildLegacyIncomingEventKey(
+            sbnKey = sbnKey,
+            postTimeMs = postTimeMs,
+            whenMs = whenMs,
+            packageName = packageName,
+            senderKey = senderKey,
+            incomingMessage = incomingMessage
+        )
     }
 
     private fun sha256Hex(input: String): String {
@@ -87,26 +126,41 @@ object AiPromptAndPolicyHelper {
     }
 
     @JvmStatic
-    fun parseAndStripNotes(rawAiReply: String?): ParsedAiResponse {
+    fun sanitizeOutboundReply(rawAiReply: String?): String {
+        val raw = rawAiReply?.trim().orEmpty()
+        if (raw.isEmpty()) return ""
+        return SAVE_NOTE_REGEX.replace(raw, "")
+            .replace(UNCLOSED_SAVE_NOTE_REGEX, "")
+            .replace(ANY_HIDDEN_MARKER_REGEX, "")
+            .replace(UNCLOSED_HIDDEN_MARKER_REGEX, "")
+            .replace(MALFORMED_SINGLE_BRACKET_SAVE_NOTE_REGEX, "")
+            .replace(TRAILING_BLANK_LINES, "\n\n")
+            .trim()
+    }
+
+    @JvmStatic
+    @JvmOverloads
+    fun parseAndStripNotes(rawAiReply: String?, extractNotes: Boolean = true): ParsedAiResponse {
         val raw = rawAiReply?.trim().orEmpty()
         if (raw.isEmpty()) {
             return ParsedAiResponse(cleanReply = "", extractedNotes = emptyList())
         }
 
         val notes = mutableListOf<String>()
-        for (match in SAVE_NOTE_REGEX.findAll(raw)) {
-            val captured = match.groupValues.getOrNull(1)
-            val sanitized = sanitizeExtractedNote(captured)
-            if (sanitized != null) {
-                notes.add(sanitized)
+        if (extractNotes) {
+            for (match in SAVE_NOTE_REGEX.findAll(raw)) {
+                val captured = match.groupValues.getOrNull(1)
+                val sanitized = sanitizeExtractedNote(captured)
+                if (sanitized != null) {
+                    notes.add(sanitized)
+                }
             }
         }
 
-        val stripped = SAVE_NOTE_REGEX.replace(raw, "")
-            .replace(TRAILING_BLANK_LINES, "\n\n")
-            .trim()
+        val stripped = sanitizeOutboundReply(raw)
+        val distinctNotes = if (extractNotes) notes.distinct() else emptyList()
 
-        val finalReply = if (stripped.isEmpty() && notes.isNotEmpty()) {
+        val finalReply = if (extractNotes && stripped.isEmpty() && distinctNotes.isNotEmpty()) {
             DEFAULT_NOTE_CONFIRMATION
         } else {
             stripped
@@ -114,7 +168,7 @@ object AiPromptAndPolicyHelper {
 
         return ParsedAiResponse(
             cleanReply = finalReply,
-            extractedNotes = notes.distinct()
+            extractedNotes = distinctNotes
         )
     }
 

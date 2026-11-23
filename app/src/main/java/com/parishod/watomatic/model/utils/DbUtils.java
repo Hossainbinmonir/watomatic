@@ -7,6 +7,8 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.parishod.watomatic.model.CustomRepliesData;
+import com.parishod.watomatic.model.ai.AiMemoryDatabase;
+import com.parishod.watomatic.model.ai.AiMemoryRepository;
 import com.parishod.watomatic.model.logs.AppPackage;
 import com.parishod.watomatic.model.logs.ClaimAcquireOutcome;
 import com.parishod.watomatic.model.logs.MessageLog;
@@ -35,9 +37,29 @@ public class DbUtils {
         return messageLogsDB.logsDao().getUniqueReplyPairCountSync();
     }
 
+    public static final long HISTORY_RETENTION_MS = 30L * 24L * 60L * 60L * 1000L;
+
     public void purgeMessageLogs() {
-        MessageLogsDB messageLogsDB = MessageLogsDB.getInstance(mContext.getApplicationContext());
-        messageLogsDB.logsDao().purgeMessageLogs();
+        purgeExpiredHistory(System.currentTimeMillis());
+    }
+
+    public int purgeExpiredHistory(long nowMs) {
+        long cutoffMs = nowMs - HISTORY_RETENTION_MS;
+        Context appCtx = mContext.getApplicationContext();
+        MessageLogsDB messageLogsDB = MessageLogsDB.getInstance(appCtx);
+        final int[] deletedCount = new int[1];
+        messageLogsDB.runInTransaction(() -> {
+            int deletedLogs = messageLogsDB.logsDao().purgeMessageLogsBeforeSync(cutoffMs);
+            int deletedAttempts = messageLogsDB.replyAttemptDao().purgeResolvedAttemptsBeforeSync(cutoffMs);
+            deletedCount[0] = deletedLogs + deletedAttempts;
+        });
+        try {
+            AiMemoryRepository aiRepo = new AiMemoryRepository(AiMemoryDatabase.getInstance(appCtx).aiMemoryDao());
+            deletedCount[0] += aiRepo.purgeExpiredMemory(appCtx, nowMs);
+        } catch (Exception ignored) {
+            // Keep MessageLogsDB purge independent if AI memory DB is unavailable
+        }
+        return deletedCount[0];
     }
 
     public ClaimAcquireOutcome tryAcquireNotificationClaim(
@@ -197,6 +219,9 @@ public class DbUtils {
         messageLogsDB.runInTransaction(() -> {
             recordAttemptResult(attempt, result, senderName, incomingMsg, sbn);
             if (eventKey != null) {
+                if (result.isDispatched() && !hasConsistentDispatchedPersistence(attempt.getAttemptId())) {
+                    return;
+                }
                 updateNotificationClaimResult(eventKey, attempt.getAttemptId(), result);
             }
         });
@@ -215,7 +240,10 @@ public class DbUtils {
             messageLogsDB.replyAttemptDao().upsertAttemptSafely(entity);
 
             if (result.isDispatched()) {
-                if (messageLogsDB.logsDao().countByAttemptIdSync(attempt.getAttemptId()) == 0) {
+                ReplyAttemptEntity persisted = messageLogsDB.replyAttemptDao().getAttemptByIdSync(attempt.getAttemptId());
+                if (persisted != null
+                        && ReplyExecutionStatus.DISPATCHED.name().equals(persisted.getStatus())
+                        && messageLogsDB.logsDao().countByAttemptIdSync(attempt.getAttemptId()) == 0) {
                     String pkg = (sbn != null && sbn.getPackageName() != null)
                             ? sbn.getPackageName()
                             : attempt.getPackageName();
@@ -236,6 +264,28 @@ public class DbUtils {
                 }
             }
         });
+    }
+
+    public boolean hasConsistentDispatchedPersistence(@NonNull String attemptId) {
+        MessageLogsDB messageLogsDB = MessageLogsDB.getInstance(mContext.getApplicationContext());
+        ReplyAttemptEntity persistedAttempt = messageLogsDB.replyAttemptDao().getAttemptByIdSync(attemptId);
+        return persistedAttempt != null
+                && ReplyExecutionStatus.DISPATCHED.name().equals(persistedAttempt.getStatus())
+                && messageLogsDB.logsDao().countByAttemptIdSync(attemptId) > 0;
+    }
+
+    public void recordFallbackAttemptOutcome(
+            @NonNull ReplyAttempt attempt,
+            @NonNull ReplyExecutionResult result,
+            @Nullable String senderName,
+            @Nullable String incomingMsg
+    ) {
+        if (result.isDispatched()) {
+            throw new IllegalArgumentException("Fallback outcome persistence must not record DISPATCHED without history");
+        }
+        MessageLogsDB messageLogsDB = MessageLogsDB.getInstance(mContext.getApplicationContext());
+        ReplyAttemptEntity entity = ReplyAttemptEntity.fromResult(attempt, result, senderName, incomingMsg);
+        messageLogsDB.replyAttemptDao().upsertAttemptSafely(entity);
     }
 
     @Nullable

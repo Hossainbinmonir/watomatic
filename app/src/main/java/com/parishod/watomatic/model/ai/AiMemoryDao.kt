@@ -42,14 +42,24 @@ interface AiMemoryDao {
     @Query("DELETE FROM ai_notes")
     suspend fun clearAllNotes()
 
+    @Query("DELETE FROM ai_notes WHERE attempt_id IS NOT NULL")
+    suspend fun clearAiGeneratedNotes()
+
     @Query("DELETE FROM ai_conversation_messages")
     suspend fun clearAllConversationMessages()
+
+    @Transaction
+    suspend fun clearConversationMemoryAndAiNotes() {
+        clearAllConversationMessages()
+        clearAiGeneratedNotes()
+    }
 
     // ---- Background Service Synchronous Queries ----
 
     @Query(
         "SELECT * FROM ai_conversation_messages " +
             "WHERE package_name = :packageName AND sender_key = :senderKey " +
+            "AND sender_key != '__unknown_sender__' AND TRIM(sender_key) != '' " +
             "AND (role = 'user' OR execution_status IN ('DISPATCHED', 'LEGACY')) " +
             "ORDER BY timestamp DESC, id DESC LIMIT :limit"
     )
@@ -111,6 +121,9 @@ interface AiMemoryDao {
     @Query("SELECT COUNT(*) FROM ai_notes")
     fun getTotalNoteCountSync(): Int
 
+    @Query("SELECT COUNT(*) FROM ai_notes WHERE attempt_id IS NOT NULL")
+    fun getAiGeneratedNoteCountSync(): Int
+
     @Query("SELECT * FROM ai_notes WHERE attempt_id = :attemptId ORDER BY created_at ASC, id ASC")
     fun getNotesByAttemptIdSync(attemptId: String): List<AiNote>
 
@@ -128,6 +141,71 @@ interface AiMemoryDao {
         senderName: String,
         limit: Int
     ): List<AiNote>
+
+    @Query(
+        "SELECT * FROM ai_notes " +
+            "WHERE is_completed = 0 AND package_name = :packageName " +
+            "AND sender_key = :senderKey " +
+            "AND sender_key != '' AND sender_key != '__unknown_sender__' " +
+            "ORDER BY created_at DESC LIMIT :limit"
+    )
+    fun getPendingNotesForSenderKeySync(
+        packageName: String,
+        senderKey: String,
+        limit: Int
+    ): List<AiNote>
+
+    @Query(
+        "SELECT COUNT(*) FROM ai_notes " +
+            "WHERE is_completed = 0 AND package_name = :packageName " +
+            "AND sender_key = :senderKey AND note_dedup_key = :noteDedupKey"
+    )
+    fun countPendingNotesByDedupKeySync(
+        packageName: String,
+        senderKey: String,
+        noteDedupKey: String
+    ): Int
+
+    @Query("DELETE FROM ai_conversation_messages WHERE timestamp <= :cutoffMs")
+    fun purgeExpiredConversationMessagesBeforeSync(cutoffMs: Long): Int
+
+    @Query(
+        "DELETE FROM ai_conversation_messages " +
+            "WHERE timestamp <= :cutoffMs " +
+            "AND (attempt_id IS NULL OR attempt_id NOT IN (:protectedAttemptIds))"
+    )
+    fun purgeExpiredConversationMessagesExcludingSync(
+        cutoffMs: Long,
+        protectedAttemptIds: List<String>
+    ): Int
+
+    @Query("DELETE FROM ai_notes WHERE created_at <= :cutoffMs")
+    fun purgeExpiredNotesBeforeSync(cutoffMs: Long): Int
+
+    @Query(
+        "DELETE FROM ai_notes " +
+            "WHERE created_at <= :cutoffMs " +
+            "AND (attempt_id IS NULL OR attempt_id NOT IN (:protectedAttemptIds))"
+    )
+    fun purgeExpiredNotesExcludingSync(
+        cutoffMs: Long,
+        protectedAttemptIds: List<String>
+    ): Int
+
+    @Transaction
+    fun purgeExpiredMemorySync(cutoffMs: Long, protectedAttemptIds: List<String>): Int {
+        val deletedMsgs = if (protectedAttemptIds.isEmpty()) {
+            purgeExpiredConversationMessagesBeforeSync(cutoffMs)
+        } else {
+            purgeExpiredConversationMessagesExcludingSync(cutoffMs, protectedAttemptIds)
+        }
+        val deletedNotes = if (protectedAttemptIds.isEmpty()) {
+            purgeExpiredNotesBeforeSync(cutoffMs)
+        } else {
+            purgeExpiredNotesExcludingSync(cutoffMs, protectedAttemptIds)
+        }
+        return deletedMsgs + deletedNotes
+    }
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun insertNoteSync(note: AiNote): Long
@@ -174,11 +252,16 @@ interface AiMemoryDao {
         incomingMessage: String,
         incomingEventKey: String?,
         timestampMs: Long,
-        keepCount: Int
+        keepCount: Int,
+        legacyIncomingEventKey: String? = null
     ): Boolean {
+        if (AiPromptAndPolicyHelper.isUnknownSender(senderKey)) return false
         val cleanIncoming = incomingMessage.trim()
         if (cleanIncoming.isEmpty()) return false
         if (!incomingEventKey.isNullOrBlank() && countMessagesByIncomingEventKeySync(incomingEventKey) > 0) {
+            return false
+        }
+        if (!legacyIncomingEventKey.isNullOrBlank() && countMessagesByIncomingEventKeySync(legacyIncomingEventKey) > 0) {
             return false
         }
         val rowId = insertConversationMessageIgnoreSync(
@@ -213,13 +296,15 @@ interface AiMemoryDao {
         memoryEnabled: Boolean,
         notesEnabled: Boolean,
         keepCount: Int,
-        timestampMs: Long
+        timestampMs: Long,
+        legacyIncomingEventKey: String? = null,
+        recordReplyLog: Boolean = true
     ): Boolean {
         if (attemptId.isBlank()) return false
 
         var insertedAny = false
 
-        if (countReplyLogsByAttemptIdSync(attemptId) == 0) {
+        if (recordReplyLog && countReplyLogsByAttemptIdSync(attemptId) == 0) {
             val logRowId = insertReplyLogIgnoreSync(
                 AiReplyLog(
                     packageName = packageName,
@@ -232,12 +317,15 @@ interface AiMemoryDao {
         }
 
         val alreadyHasAssistant = countAssistantMessagesByAttemptIdSync(attemptId) > 0
+        val effectiveMemoryEnabled = memoryEnabled && !AiPromptAndPolicyHelper.isUnknownSender(senderKey)
 
-        if (memoryEnabled) {
+        if (effectiveMemoryEnabled) {
             val cleanIncoming = incomingMessage.trim()
             if (cleanIncoming.isNotEmpty()) {
-                val shouldInsertIncoming = if (!incomingEventKey.isNullOrBlank()) {
-                    countMessagesByIncomingEventKeySync(incomingEventKey) == 0
+                val hasMatchingEventKey = (!incomingEventKey.isNullOrBlank() && countMessagesByIncomingEventKeySync(incomingEventKey) > 0) ||
+                    (!legacyIncomingEventKey.isNullOrBlank() && countMessagesByIncomingEventKeySync(legacyIncomingEventKey) > 0)
+                val shouldInsertIncoming = if (!incomingEventKey.isNullOrBlank() || !legacyIncomingEventKey.isNullOrBlank()) {
+                    !hasMatchingEventKey
                 } else {
                     !alreadyHasAssistant
                 }
@@ -290,7 +378,9 @@ interface AiMemoryDao {
             val seenKeys = HashSet<String>()
             sanitizedNotes.forEachIndexed { index, noteText ->
                 val dedupKey = AiPromptAndPolicyHelper.computeNoteDedupKey(noteText)
-                if (seenKeys.add(dedupKey)) {
+                val alreadyPendingSameSender = !AiPromptAndPolicyHelper.isUnknownSender(senderKey) &&
+                    countPendingNotesByDedupKeySync(packageName, senderKey, dedupKey) > 0
+                if (seenKeys.add(dedupKey) && !alreadyPendingSameSender) {
                     val noteRowId = insertNoteIgnoreSync(
                         AiNote(
                             senderName = senderDisplay,
@@ -300,7 +390,8 @@ interface AiMemoryDao {
                             createdAt = timestampMs + index,
                             isCompleted = false,
                             attemptId = attemptId,
-                            noteDedupKey = dedupKey
+                            noteDedupKey = dedupKey,
+                            senderKey = senderKey
                         )
                     )
                     if (noteRowId > 0L) insertedAny = true

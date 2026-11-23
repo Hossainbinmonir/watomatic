@@ -101,23 +101,28 @@ data class ReplyAttemptEntity(
             attempt: ReplyAttempt,
             senderName: String?,
             incomingMessage: String?
-        ): ReplyAttemptEntity = ReplyAttemptEntity(
-            attemptId = attempt.attemptId,
-            packageName = attempt.packageName,
-            senderName = senderName,
-            incomingMessage = incomingMessage,
-            notificationKey = attempt.notificationKey,
-            replyText = attempt.replyText,
-            sourceType = attempt.sourceType.name,
-            sourceLabel = attempt.sourceLabel,
-            status = attempt.status.name,
-            dispatchAttempted = false,
-            dispatchedNormally = false,
-            failureCategory = null,
-            createdAtMs = attempt.createdAtMs,
-            updatedAtMs = attempt.updatedAtMs,
-            eventKey = attempt.eventKey
-        )
+        ): ReplyAttemptEntity {
+            val dispatchAttempted = attempt.status == ReplyExecutionStatus.DISPATCHING ||
+                attempt.status == ReplyExecutionStatus.DISPATCHED ||
+                attempt.status == ReplyExecutionStatus.UNKNOWN
+            return ReplyAttemptEntity(
+                attemptId = attempt.attemptId,
+                packageName = attempt.packageName,
+                senderName = senderName,
+                incomingMessage = incomingMessage,
+                notificationKey = attempt.notificationKey,
+                replyText = attempt.replyText,
+                sourceType = attempt.sourceType.name,
+                sourceLabel = attempt.sourceLabel,
+                status = attempt.status.name,
+                dispatchAttempted = dispatchAttempted,
+                dispatchedNormally = false,
+                failureCategory = null,
+                createdAtMs = attempt.createdAtMs,
+                updatedAtMs = attempt.updatedAtMs,
+                eventKey = attempt.eventKey
+            )
+        }
 
         @JvmStatic
         fun fromResult(

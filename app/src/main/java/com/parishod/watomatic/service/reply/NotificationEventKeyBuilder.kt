@@ -49,7 +49,7 @@ object NotificationEventKeyBuilder {
 
         val isGroup = extras?.getBoolean("android.isGroupConversation", false) ?: false
         val rawSender = runCatching { NotificationUtils.getTitle(sbn) }.getOrNull()
-        val senderNormalized = normalizeSenderKey(rawSender)
+        val senderNormalized = normalizeSenderKey(rawSender, isGroup)
 
         val extractedMessage = extractIncomingMessage(sbn) ?: fallbackIncomingMessage
         val normalizedMessage = normalizeMessage(extractedMessage)
@@ -66,9 +66,16 @@ object NotificationEventKeyBuilder {
     }
 
     @JvmStatic
-    fun normalizeSenderKey(senderName: String?): String {
+    @JvmOverloads
+    fun normalizeSenderKey(senderName: String?, isGroup: Boolean = false): String {
         val trimmed = senderName?.trim()?.lowercase(Locale.ROOT).orEmpty()
-        return trimmed.ifEmpty { UNKNOWN_SENDER }
+        if (trimmed.isEmpty()) return UNKNOWN_SENDER
+        return if (isGroup) "group:$trimmed" else trimmed
+    }
+
+    @JvmStatic
+    fun isUnknownSender(senderKey: String?): Boolean {
+        return senderKey.isNullOrBlank() || senderKey == UNKNOWN_SENDER
     }
 
     @JvmStatic

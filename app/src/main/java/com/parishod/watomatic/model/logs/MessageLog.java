@@ -27,8 +27,10 @@ public class MessageLog {
     @NonNull
     private int index;
     @ColumnInfo(name = "notif_id")
+    @Nullable
     private String notifId;
     @ColumnInfo(name = "notif_title")
+    @Nullable
     private String notifTitle;
     @ColumnInfo(name = "notif_incoming_msg")
     @Nullable
@@ -38,6 +40,7 @@ public class MessageLog {
     @ColumnInfo(name = "notif_is_replied")
     private boolean notifIsReplied;
     @ColumnInfo(name = "notif_replied_msg")
+    @Nullable
     private String notifRepliedMsg;
     @ColumnInfo(name = "matched_rule_name")
     @Nullable
@@ -52,9 +55,9 @@ public class MessageLog {
     private String attemptId;
 
     public MessageLog(int index,
-                      String notifTitle,
+                      @Nullable String notifTitle,
                       long notifArrivedTime,
-                      String notifRepliedMsg,
+                      @Nullable String notifRepliedMsg,
                       long notifReplyTime
     ) {
         this.index = index;
@@ -70,10 +73,10 @@ public class MessageLog {
 
     @Ignore
     public MessageLog(int index,
-                      String notifTitle,
+                      @Nullable String notifTitle,
                       @Nullable String notifIncomingMsg,
                       long notifArrivedTime,
-                      String notifRepliedMsg,
+                      @Nullable String notifRepliedMsg,
                       @Nullable String matchedRuleName,
                       long notifReplyTime
     ) {
@@ -84,10 +87,10 @@ public class MessageLog {
 
     @Ignore
     public MessageLog(int index,
-                      String notifTitle,
+                      @Nullable String notifTitle,
                       @Nullable String notifIncomingMsg,
                       long notifArrivedTime,
-                      String notifRepliedMsg,
+                      @Nullable String notifRepliedMsg,
                       @Nullable String matchedRuleName,
                       long notifReplyTime,
                       @NonNull String executionStatus,
@@ -114,19 +117,21 @@ public class MessageLog {
         this.index = index;
     }
 
+    @Nullable
     public String getNotifId() {
         return notifId;
     }
 
-    public void setNotifId(String notifId) {
+    public void setNotifId(@Nullable String notifId) {
         this.notifId = notifId;
     }
 
+    @Nullable
     public String getNotifTitle() {
         return notifTitle;
     }
 
-    public void setNotifTitle(String notifTitle) {
+    public void setNotifTitle(@Nullable String notifTitle) {
         this.notifTitle = notifTitle;
     }
 
@@ -155,11 +160,12 @@ public class MessageLog {
         this.notifIsReplied = notifIsReplied;
     }
 
+    @Nullable
     public String getNotifRepliedMsg() {
         return notifRepliedMsg;
     }
 
-    public void setNotifRepliedMsg(String notifRepliedMsg) {
+    public void setNotifRepliedMsg(@Nullable String notifRepliedMsg) {
         this.notifRepliedMsg = notifRepliedMsg;
     }
 

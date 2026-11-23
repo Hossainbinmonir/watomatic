@@ -652,6 +652,271 @@ class NotificationServiceDispatchTest {
         assertFalse(failResult.isDispatched())
     }
 
+    @Test
+    fun `sendReply with missing PendingIntent skips AI generation and releases claim`() {
+        val sendCount = AtomicInteger(0)
+        val manager = ReplyExecutionManager(
+            context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ -> sendCount.incrementAndGet() }
+        )
+        service.setReplyExecutionManagerForTesting(manager)
+        prefs.setEnableByokReplies(true)
+        prefs.saveOpenAIApiKey("sk-test-missing-pi")
+
+        val remoteInput = RemoteInput.Builder("reply_key")
+            .setLabel("Reply")
+            .setAllowFreeFormInput(true)
+            .build()
+        val actionWithoutPi = NotificationCompat.Action.Builder(0, "Reply", null)
+            .addRemoteInput(remoteInput)
+            .build()
+        val notification = NotificationCompat.Builder(context, "test_channel")
+            .setContentTitle("Grace")
+            .setContentText("Are you there?")
+            .addAction(actionWithoutPi)
+            .build()
+        val sbnWithoutPi = StatusBarNotification(
+            "com.whatsapp",
+            "com.whatsapp",
+            301,
+            "tag-301",
+            0,
+            0,
+            0,
+            notification,
+            Process.myUserHandle(),
+            System.currentTimeMillis()
+        )
+        val eventKey = com.parishod.watomatic.service.reply.NotificationEventKeyBuilder.buildEventKey(sbnWithoutPi, "Are you there?")!!
+        val claimToken = "claim-missing-pi-301"
+        val acquired = dbUtils.tryAcquireNotificationClaim(eventKey, claimToken, "com.whatsapp", "grace", sbnWithoutPi.key, 1_000L, false)
+        assertTrue(acquired.acquired)
+
+        val sendReplyWithToken = NotificationService::class.java.getDeclaredMethod(
+            "sendReply",
+            StatusBarNotification::class.java,
+            String::class.java
+        ).apply { isAccessible = true }
+        sendReplyWithToken.invoke(service, sbnWithoutPi, claimToken)
+        service.awaitAiMemoryIdleForTesting()
+
+        assertEquals(0, sendCount.get())
+        assertEquals(0L, dbUtils.numReplies)
+        assertEquals(0, dbUtils.totalAttemptCount)
+        assertNull(dbUtils.getNotificationClaim(eventKey))
+    }
+
+    @Test
+    fun `sendActualReply with null StatusBarNotification fails closed without bypassing claim protection`() {
+        val sendCount = AtomicInteger(0)
+        val manager = ReplyExecutionManager(
+            context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ -> sendCount.incrementAndGet() }
+        )
+        service.setReplyExecutionManagerForTesting(manager)
+        val wear = wearFromSbn(buildNotificationSbn(id = 302))
+
+        val result = service.sendActualReply(null, wear, "Should not send", null, ReplySourceType.DEFAULT)
+
+        assertEquals(ReplyExecutionStatus.FAILED, result.status)
+        assertFalse(result.dispatchAttempted)
+        assertFalse(result.dispatchedNormally)
+        assertEquals(ReplyExecutionManager.FAILURE_MISSING_WEAR_DATA, result.failureCategory)
+        assertEquals(0, sendCount.get())
+        assertEquals(0L, dbUtils.numReplies)
+    }
+
+    @Test
+    fun `CANCELLED outcomes preserve dispatchAttempted false before send and true after PendingIntent CanceledException`() {
+        val db = MessageLogsDB.getInstance(context)
+
+        // 1. Pre-send CANCELLED (manager already shut down) -> dispatchAttempted = false
+        val shutdownManager = ReplyExecutionManager(
+            context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ -> }
+        )
+        shutdownManager.shutdown()
+        service.setReplyExecutionManagerForTesting(shutdownManager)
+
+        val sbnPreCancel = buildNotificationSbn(sender = "PreCancel", message = "Shutdown before send", id = 401)
+        val preEventKey = com.parishod.watomatic.service.reply.NotificationEventKeyBuilder.buildEventKey(sbnPreCancel)!!
+        val preRes = service.sendActualReply(sbnPreCancel, wearFromSbn(sbnPreCancel), "Reply", null, ReplySourceType.DEFAULT)
+
+        assertEquals(ReplyExecutionStatus.CANCELLED, preRes.status)
+        assertFalse(preRes.dispatchAttempted)
+        assertEquals(ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN, preRes.failureCategory)
+        assertFalse(dbUtils.getAttemptById(preRes.executionId)!!.dispatchAttempted)
+        assertFalse(dbUtils.getNotificationClaim(preEventKey)!!.dispatchAttempted)
+        assertEquals(0L, dbUtils.numReplies)
+
+        // 2. Post-attempt CANCELLED via PendingIntent.CanceledException -> dispatchAttempted = true
+        val canceledManager = ReplyExecutionManager(
+            context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+                throw PendingIntent.CanceledException("expired during send")
+            }
+        )
+        service.setReplyExecutionManagerForTesting(canceledManager)
+
+        val sbnPostCancel = buildNotificationSbn(sender = "PostCancel", message = "Canceled during send", id = 402)
+        val postEventKey = com.parishod.watomatic.service.reply.NotificationEventKeyBuilder.buildEventKey(sbnPostCancel)!!
+        val postRes = service.sendActualReply(sbnPostCancel, wearFromSbn(sbnPostCancel), "Reply", null, ReplySourceType.DEFAULT)
+
+        assertEquals(ReplyExecutionStatus.CANCELLED, postRes.status)
+        assertTrue(postRes.dispatchAttempted)
+        assertFalse(postRes.dispatchedNormally)
+        assertEquals(ReplyExecutionManager.FAILURE_PENDING_INTENT_CANCELED, postRes.failureCategory)
+        val storedPostAttempt = db.replyAttemptDao().getAttemptByIdSync(postRes.executionId)!!
+        assertEquals("CANCELLED", storedPostAttempt.status)
+        assertTrue(storedPostAttempt.dispatchAttempted)
+        val storedPostClaim = db.notificationDispatchClaimDao().getClaimByEventKeySync(postEventKey)!!
+        assertEquals("CANCELLED", storedPostClaim.claimStatus)
+        assertTrue(storedPostClaim.dispatchAttempted)
+        assertEquals(0L, dbUtils.numReplies)
+    }
+
+    @Test
+    fun `DISPATCHING persistence failure followed by unexpected execution exception classifies as UNKNOWN rather than FAILED`() {
+        val db = MessageLogsDB.getInstance(context)
+        val partialFailDbUtils = object : DbUtils(context) {
+            override fun recordAttemptTransition(
+                attempt: com.parishod.watomatic.service.reply.ReplyAttempt,
+                senderName: String?,
+                incomingMsg: String?
+            ) {
+                if (attempt.status == ReplyExecutionStatus.DISPATCHING) {
+                    throw IllegalStateException("Simulated DB failure on DISPATCHING attempt write")
+                }
+                super.recordAttemptTransition(attempt, senderName, incomingMsg)
+            }
+
+            override fun updateNotificationClaimTransition(
+                eventKey: String,
+                expectedAttemptId: String,
+                newAttemptId: String,
+                status: ReplyExecutionStatus,
+                updatedAtMs: Long
+            ): Int {
+                if (status == ReplyExecutionStatus.DISPATCHING) {
+                    throw IllegalStateException("Simulated DB failure on DISPATCHING claim write")
+                }
+                return super.updateNotificationClaimTransition(eventKey, expectedAttemptId, newAttemptId, status, updatedAtMs)
+            }
+        }
+        service.setDbUtilsForTesting(partialFailDbUtils)
+
+        val clockCalls = AtomicInteger(0)
+        val manager = ReplyExecutionManager(
+            context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ -> },
+            clock = {
+                if (clockCalls.incrementAndGet() >= 2) {
+                    throw IllegalStateException("Unexpected exception after crossing DISPATCHING")
+                }
+                10_000L
+            }
+        )
+        service.setReplyExecutionManagerForTesting(manager)
+
+        val sbn = buildNotificationSbn(sender = "Ambiguous", message = "Crash after DISPATCHING", id = 403)
+        val eventKey = com.parishod.watomatic.service.reply.NotificationEventKeyBuilder.buildEventKey(sbn)!!
+        val result = service.sendActualReply(sbn, wearFromSbn(sbn), "Reply", null, ReplySourceType.DEFAULT)
+
+        assertEquals(ReplyExecutionStatus.UNKNOWN, result.status)
+        assertTrue(result.dispatchAttempted)
+        assertFalse(result.dispatchedNormally)
+        assertEquals(ReplyExecutionManager.FAILURE_AMBIGUOUS_SEND_EXCEPTION, result.failureCategory)
+        assertEquals("UNKNOWN", db.replyAttemptDao().getAttemptByIdSync(result.executionId)!!.status)
+        assertEquals("UNKNOWN", db.notificationDispatchClaimDao().getClaimByEventKeySync(eventKey)!!.claimStatus)
+        assertEquals(0L, partialFailDbUtils.numReplies)
+    }
+
+    @Test
+    fun `outcome persistence failure does not promote claim to DISPATCHED and locks replay conservatively`() {
+        val db = MessageLogsDB.getInstance(context)
+        val throwingResultDbUtils = object : DbUtils(context) {
+            override fun recordAttemptResult(
+                attempt: com.parishod.watomatic.service.reply.ReplyAttempt,
+                result: com.parishod.watomatic.service.reply.ReplyExecutionResult,
+                senderName: String?,
+                incomingMsg: String?,
+                sbn: StatusBarNotification?
+            ) {
+                throw IllegalStateException("Simulated MessageLog write error")
+            }
+        }
+        service.setDbUtilsForTesting(throwingResultDbUtils)
+
+        val sendCount = AtomicInteger(0)
+        service.setReplyExecutionManagerForTesting(
+            ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+                sendCount.incrementAndGet()
+            })
+        )
+
+        val sbn = buildNotificationSbn(sender = "SplitBrain", message = "Check atomicity", id = 404)
+        val eventKey = com.parishod.watomatic.service.reply.NotificationEventKeyBuilder.buildEventKey(sbn)!!
+        val res = service.sendActualReply(sbn, wearFromSbn(sbn), "Reply text", null, ReplySourceType.DEFAULT)
+
+        assertEquals(ReplyExecutionStatus.DISPATCHED, res.status)
+        assertEquals(1, sendCount.get())
+
+        // Claim MUST NOT be promoted to DISPATCHED while MessageLog/attempt persistence failed
+        val claim = db.notificationDispatchClaimDao().getClaimByEventKeySync(eventKey)!!
+        assertEquals(ReplyExecutionStatus.UNKNOWN.name, claim.claimStatus)
+        assertEquals(ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR, claim.failureCategory)
+        assertTrue(claim.dispatchAttempted)
+        assertFalse(claim.dispatchedNormally)
+        assertEquals(0L, db.logsDao().getNumReplies())
+
+        // Conservative fallback attempt persisted as UNKNOWN (not DISPATCHED)
+        val attemptEntity = db.replyAttemptDao().getAttemptByIdSync(res.executionId)!!
+        assertEquals(ReplyExecutionStatus.UNKNOWN.name, attemptEntity.status)
+        assertEquals(ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR, attemptEntity.failureCategory)
+
+        // Duplicate redelivery MUST stay locked
+        val replay = service.sendActualReply(sbn, wearFromSbn(sbn), "Reply text", null, ReplySourceType.DEFAULT)
+        assertEquals(ReplyExecutionStatus.CANCELLED, replay.status)
+        assertEquals(ReplyExecutionManager.FAILURE_UNKNOWN_OUTCOME_LOCKED, replay.failureCategory)
+        assertEquals(1, sendCount.get())
+    }
+
+    @Test
+    fun `claim-only failure in recordAttemptAndClaimResult recovers DISPATCHED consistency via fallback without duplicate MessageLog`() {
+        val db = MessageLogsDB.getInstance(context)
+        val failFirstTransactionDbUtils = object : DbUtils(context) {
+            private var threwOnce = false
+            override fun recordAttemptAndClaimResult(
+                eventKey: String?,
+                attempt: com.parishod.watomatic.service.reply.ReplyAttempt,
+                result: com.parishod.watomatic.service.reply.ReplyExecutionResult,
+                senderName: String?,
+                incomingMsg: String?,
+                sbn: StatusBarNotification?
+            ) {
+                if (!threwOnce) {
+                    threwOnce = true
+                    throw IllegalStateException("Simulated transient claim transaction failure")
+                }
+                super.recordAttemptAndClaimResult(eventKey, attempt, result, senderName, incomingMsg, sbn)
+            }
+        }
+        service.setDbUtilsForTesting(failFirstTransactionDbUtils)
+
+        service.setReplyExecutionManagerForTesting(
+            ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ -> })
+        )
+
+        val sbn = buildNotificationSbn(sender = "Recoverable", message = "Recover fallback", id = 405)
+        val eventKey = com.parishod.watomatic.service.reply.NotificationEventKeyBuilder.buildEventKey(sbn)!!
+        val res = service.sendActualReply(sbn, wearFromSbn(sbn), "Reply text", null, ReplySourceType.DEFAULT)
+
+        assertEquals(ReplyExecutionStatus.DISPATCHED, res.status)
+        assertEquals(1, db.logsDao().countByAttemptIdSync(res.executionId))
+        assertEquals("DISPATCHED", db.replyAttemptDao().getAttemptByIdSync(res.executionId)!!.status)
+        assertEquals("DISPATCHED", db.notificationDispatchClaimDao().getClaimByEventKeySync(eventKey)!!.claimStatus)
+    }
+
     private fun <T> immediateCall(response: Response<T>): Call<T> = object : Call<T> {
         override fun enqueue(callback: Callback<T>) = callback.onResponse(this, response)
         override fun isExecuted(): Boolean = true

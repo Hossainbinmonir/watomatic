@@ -15,9 +15,12 @@ import android.util.Log;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
-/*
-* Currently not used, but in future if any app does not support replying from background service we can leverage this
-* */
+/**
+ * @deprecated Dormant legacy service disabled in {@code AndroidManifest.xml}.
+ * Direct {@link PendingIntent#send} dispatch is intentionally disabled here; any future
+ * foreground reply dispatch must route through {@link com.parishod.watomatic.service.reply.ReplyExecutionManager}.
+ */
+@Deprecated
 public class ReplyService extends Service {
     private static final String TAG = "ReplyService";
     private static final String CHANNEL_ID = "watomatic_reply_channel";
@@ -30,22 +33,7 @@ public class ReplyService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        startForegroundReply();
-
-        if (intent != null) {
-            PendingIntent pendingIntent = intent.getParcelableExtra("pendingIntent");
-            Intent fillInIntent = intent.getParcelableExtra("fillInIntent");
-
-            if (pendingIntent != null && fillInIntent != null) {
-                try {
-                    Log.d(TAG, "Sending reply via ReplyService");
-                    pendingIntent.send(this, 0, fillInIntent);
-                } catch (PendingIntent.CanceledException e) {
-                    Log.e(TAG, "Failed to send reply: " + e.getMessage());
-                }
-            }
-        }
-
+        Log.w(TAG, "Ignoring deprecated ReplyService start; replies must dispatch via ReplyExecutionManager.");
         stopForeground(true);
         stopSelf();
         return START_NOT_STICKY;

@@ -20,6 +20,9 @@ interface ReplyAttemptDao {
     @Query("SELECT * FROM reply_attempts WHERE status IN ('GENERATED', 'DISPATCHING') ORDER BY created_at_ms ASC")
     fun getUnresolvedAttemptsSync(): List<ReplyAttemptEntity>
 
+    @Query("SELECT attempt_id FROM reply_attempts WHERE status IN ('GENERATED', 'DISPATCHING', 'UNKNOWN')")
+    fun getProtectedAttemptIdsSync(): List<String>
+
     @Query("SELECT * FROM reply_attempts WHERE event_key = :eventKey ORDER BY created_at_ms DESC")
     fun getAttemptsByEventKeySync(eventKey: String): List<ReplyAttemptEntity>
 
@@ -33,18 +36,20 @@ interface ReplyAttemptDao {
     fun upsertAttemptSafely(entity: ReplyAttemptEntity) {
         val existing = getAttemptByIdSync(entity.attemptId)
         if (existing != null) {
-            // Never convert UNKNOWN into DISPATCHED.
-            if (existing.status == ReplyExecutionStatus.UNKNOWN.name &&
-                entity.status == ReplyExecutionStatus.DISPATCHED.name
-            ) {
+            // Once an attempt reaches a terminal state (DISPATCHED, FAILED, CANCELLED, UNKNOWN),
+            // it is immutable and cannot be overwritten by stale, out-of-order, or conflicting updates.
+            if (isTerminalStatus(existing.status)) {
                 return
             }
-            // Never regress an already-terminal attempt back to GENERATED/DISPATCHING.
-            if (isTerminalStatus(existing.status) && !isTerminalStatus(entity.status)) {
+            // Never regress an in-progress DISPATCHING attempt back to GENERATED.
+            if (existing.status == ReplyExecutionStatus.DISPATCHING.name &&
+                entity.status == ReplyExecutionStatus.GENERATED.name
+            ) {
                 return
             }
             val merged = entity.copy(
                 createdAtMs = minOf(existing.createdAtMs, entity.createdAtMs),
+                dispatchAttempted = existing.dispatchAttempted || entity.dispatchAttempted,
                 senderName = entity.senderName ?: existing.senderName,
                 incomingMessage = entity.incomingMessage ?: existing.incomingMessage,
                 failureCategory = entity.failureCategory ?: existing.failureCategory,
@@ -55,6 +60,13 @@ interface ReplyAttemptDao {
             upsertRawSync(entity)
         }
     }
+
+    @Query(
+        "DELETE FROM reply_attempts " +
+            "WHERE updated_at_ms <= :cutoffMs " +
+            "AND status IN ('DISPATCHED', 'FAILED', 'CANCELLED')"
+    )
+    fun purgeResolvedAttemptsBeforeSync(cutoffMs: Long): Int
 
     @Query("DELETE FROM reply_attempts WHERE attempt_id = :attemptId")
     fun deleteByAttemptIdSync(attemptId: String)

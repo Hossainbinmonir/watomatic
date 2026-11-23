@@ -221,6 +221,35 @@ class ReplyExecutionManagerTest {
     }
 
     @Test
+    fun `empty and whitespace-only reply text returns FAILED without attempting dispatch`() {
+        val sendCount = AtomicInteger(0)
+        val manager = ReplyExecutionManager(
+            context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ -> sendCount.incrementAndGet() }
+        )
+        val wear = sampleWear()
+
+        val emptyResult = manager.executeReply(
+            ReplyAttempt.create(replyText = "", notificationKey = "k5-empty"),
+            wear
+        )
+        assertEquals(ReplyExecutionStatus.FAILED, emptyResult.status)
+        assertFalse(emptyResult.dispatchAttempted)
+        assertFalse(emptyResult.dispatchedNormally)
+        assertEquals(ReplyExecutionManager.FAILURE_INVALID_REPLY_TEXT, emptyResult.failureCategory)
+
+        val whitespaceResult = manager.executeReply(
+            ReplyAttempt.create(replyText = "   \t\n  ", notificationKey = "k5-whitespace"),
+            wear
+        )
+        assertEquals(ReplyExecutionStatus.FAILED, whitespaceResult.status)
+        assertFalse(whitespaceResult.dispatchAttempted)
+        assertFalse(whitespaceResult.dispatchedNormally)
+        assertEquals(ReplyExecutionManager.FAILURE_INVALID_REPLY_TEXT, whitespaceResult.failureCategory)
+        assertEquals(0, sendCount.get())
+    }
+
+    @Test
     fun `CanceledException from PendingIntent returns CANCELLED`() {
         val manager = ReplyExecutionManager(context, pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
             throw PendingIntent.CanceledException("expired")
@@ -711,10 +740,11 @@ class ReplyExecutionManagerTest {
     }
 
     @Test
-    fun `shutdown during preDispatchValidator prevents dispatch before PendingIntent send`() {
+    fun `shutdown during preDispatchValidator prevents dispatch before DISPATCHING transition`() {
         val enteredValidator = CountDownLatch(1)
         val releaseValidator = CountDownLatch(1)
         val sendAttempts = AtomicInteger(0)
+        val transitions = mutableListOf<ReplyExecutionStatus>()
         val manager = ReplyExecutionManager(
             context = context,
             pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
@@ -732,7 +762,9 @@ class ReplyExecutionManagerTest {
                 manager.executeReply(
                     ReplyAttempt.create(replyText = "Hello", notificationKey = "race-validator"),
                     sampleWear()
-                )
+                ) { updated ->
+                    transitions.add(updated.status)
+                }
             }
             assertTrue(enteredValidator.await(5, TimeUnit.SECONDS))
 
@@ -746,6 +778,7 @@ class ReplyExecutionManagerTest {
             assertFalse(result.dispatchedNormally)
             assertEquals(ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN, result.failureCategory)
             assertEquals(0, sendAttempts.get())
+            assertEquals(listOf(ReplyExecutionStatus.GENERATED, ReplyExecutionStatus.CANCELLED), transitions)
             assertEquals(0, manager.activeInFlightCount())
         } finally {
             releaseValidator.countDown()
@@ -754,10 +787,57 @@ class ReplyExecutionManagerTest {
     }
 
     @Test
-    fun `shutdown during DISPATCHING transition prevents PendingIntent send without deadlocking`() {
+    fun `shutdown during GENERATED transition cancels before DISPATCHING without invoking PendingIntent send`() {
+        val enteredGeneratedListener = CountDownLatch(1)
+        val releaseGeneratedListener = CountDownLatch(1)
+        val sendAttempts = AtomicInteger(0)
+        val transitions = mutableListOf<ReplyExecutionStatus>()
+        val manager = ReplyExecutionManager(
+            context = context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+                sendAttempts.incrementAndGet()
+            }
+        )
+
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit<ReplyExecutionResult> {
+                manager.executeReply(
+                    ReplyAttempt.create(replyText = "Hello", notificationKey = "race-generated"),
+                    sampleWear()
+                ) { updated ->
+                    transitions.add(updated.status)
+                    if (updated.status == ReplyExecutionStatus.GENERATED) {
+                        enteredGeneratedListener.countDown()
+                        assertTrue(releaseGeneratedListener.await(5, TimeUnit.SECONDS))
+                    }
+                }
+            }
+            assertTrue(enteredGeneratedListener.await(5, TimeUnit.SECONDS))
+
+            manager.shutdown()
+            releaseGeneratedListener.countDown()
+
+            val result = future.get(5, TimeUnit.SECONDS)
+            assertEquals(ReplyExecutionStatus.CANCELLED, result.status)
+            assertFalse(result.dispatchAttempted)
+            assertFalse(result.dispatchedNormally)
+            assertEquals(ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN, result.failureCategory)
+            assertEquals(0, sendAttempts.get())
+            assertEquals(listOf(ReplyExecutionStatus.GENERATED, ReplyExecutionStatus.CANCELLED), transitions)
+            assertEquals(0, manager.activeInFlightCount())
+        } finally {
+            releaseGeneratedListener.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `shutdown during DISPATCHING transition completes in-flight dispatch without deadlocking and blocks subsequent dispatches`() {
         val enteredDispatchingListener = CountDownLatch(1)
         val releaseDispatchingListener = CountDownLatch(1)
         val sendAttempts = AtomicInteger(0)
+        val transitions = mutableListOf<ReplyExecutionStatus>()
         val manager = ReplyExecutionManager(
             context = context,
             pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
@@ -772,6 +852,7 @@ class ReplyExecutionManagerTest {
                     ReplyAttempt.create(replyText = "Hello", notificationKey = "race-listener"),
                     sampleWear()
                 ) { updated ->
+                    transitions.add(updated.status)
                     if (updated.status == ReplyExecutionStatus.DISPATCHING) {
                         enteredDispatchingListener.countDown()
                         assertTrue(releaseDispatchingListener.await(5, TimeUnit.SECONDS))
@@ -781,15 +862,32 @@ class ReplyExecutionManagerTest {
             assertTrue(enteredDispatchingListener.await(5, TimeUnit.SECONDS))
 
             manager.shutdown()
+            assertTrue(manager.isShutDown())
             releaseDispatchingListener.countDown()
 
             val result = future.get(5, TimeUnit.SECONDS)
-            assertEquals(ReplyExecutionStatus.CANCELLED, result.status)
-            assertFalse(result.dispatchAttempted)
-            assertFalse(result.dispatchedNormally)
-            assertEquals(ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN, result.failureCategory)
-            assertEquals(0, sendAttempts.get())
+            assertEquals(ReplyExecutionStatus.DISPATCHED, result.status)
+            assertTrue(result.dispatchAttempted)
+            assertTrue(result.dispatchedNormally)
+            assertEquals(1, sendAttempts.get())
+            assertEquals(
+                listOf(
+                    ReplyExecutionStatus.GENERATED,
+                    ReplyExecutionStatus.DISPATCHING,
+                    ReplyExecutionStatus.DISPATCHED
+                ),
+                transitions
+            )
             assertEquals(0, manager.activeInFlightCount())
+
+            val subsequent = manager.executeReply(
+                ReplyAttempt.create(replyText = "After shutdown", notificationKey = "race-listener-2"),
+                sampleWear()
+            )
+            assertEquals(ReplyExecutionStatus.CANCELLED, subsequent.status)
+            assertFalse(subsequent.dispatchAttempted)
+            assertEquals(ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN, subsequent.failureCategory)
+            assertEquals(1, sendAttempts.get())
         } finally {
             releaseDispatchingListener.countDown()
             executor.shutdownNow()
@@ -922,6 +1020,113 @@ class ReplyExecutionManagerTest {
             threw = true
         }
         assertTrue(threw)
+        assertEquals(0, manager.activeInFlightCount())
+
+        val subsequentResult = manager.executeReply(
+            ReplyAttempt.create(replyText = "Second", notificationKey = sharedKey),
+            sampleWear()
+        )
+        assertEquals(ReplyExecutionStatus.DISPATCHED, subsequentResult.status)
+        assertEquals(1, sendAttempts.get())
+        assertEquals(0, manager.activeInFlightCount())
+    }
+
+    @Test
+    fun `missing all stable coordination keys rejects execution instead of using attemptId fallback`() {
+        val sendAttempts = AtomicInteger(0)
+        val manager = ReplyExecutionManager(
+            context = context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+                sendAttempts.incrementAndGet()
+            }
+        )
+        val unnamedWear = sampleWear(id = "   ")
+        val unnamedAttempt = ReplyAttempt.create(
+            replyText = "Hello",
+            notificationKey = null,
+            eventKey = null
+        )
+
+        val result = manager.executeReply(unnamedAttempt, unnamedWear)
+
+        assertEquals(ReplyExecutionStatus.FAILED, result.status)
+        assertFalse(result.dispatchAttempted)
+        assertFalse(result.dispatchedNormally)
+        assertEquals(ReplyExecutionManager.FAILURE_MISSING_WEAR_DATA, result.failureCategory)
+        assertEquals(0, sendAttempts.get())
+        assertEquals(0, manager.activeInFlightCount())
+    }
+
+    @Test
+    fun `concurrent attempts sharing eventKey serialize even when notificationKey and wear id are blank`() {
+        val enteredFirst = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val sendAttempts = AtomicInteger(0)
+        val manager = ReplyExecutionManager(
+            context = context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+                sendAttempts.incrementAndGet()
+                enteredFirst.countDown()
+                assertTrue(releaseFirst.await(5, TimeUnit.SECONDS))
+            }
+        )
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val firstFuture = executor.submit<ReplyExecutionResult> {
+                manager.executeReply(
+                    ReplyAttempt.create(replyText = "First", notificationKey = null, eventKey = "evt-shared"),
+                    sampleWear(id = "")
+                )
+            }
+            assertTrue(enteredFirst.await(5, TimeUnit.SECONDS))
+
+            val secondResult = executor.submit<ReplyExecutionResult> {
+                manager.executeReply(
+                    ReplyAttempt.create(replyText = "Second", notificationKey = null, eventKey = "evt-shared"),
+                    sampleWear(id = "")
+                )
+            }.get(5, TimeUnit.SECONDS)
+
+            assertEquals(ReplyExecutionStatus.CANCELLED, secondResult.status)
+            assertFalse(secondResult.dispatchAttempted)
+            assertEquals(ReplyExecutionManager.FAILURE_CONCURRENT_IN_FLIGHT, secondResult.failureCategory)
+
+            releaseFirst.countDown()
+            val firstResult = firstFuture.get(5, TimeUnit.SECONDS)
+            assertEquals(ReplyExecutionStatus.DISPATCHED, firstResult.status)
+            assertEquals(1, sendAttempts.get())
+            assertEquals(0, manager.activeInFlightCount())
+        } finally {
+            releaseFirst.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `non-Exception Error from PendingIntentSender propagates without concealment and releases lock`() {
+        val throwOnce = AtomicInteger(1)
+        val sendAttempts = AtomicInteger(0)
+        val manager = ReplyExecutionManager(
+            context = context,
+            pendingIntentSender = ReplyExecutionManager.PendingIntentSender { _, _, _ ->
+                if (throwOnce.getAndSet(0) == 1) {
+                    throw AssertionError("fatal test error")
+                }
+                sendAttempts.incrementAndGet()
+            }
+        )
+        val sharedKey = "0|com.whatsapp|error-unlock|tag|0"
+
+        var caughtError = false
+        try {
+            manager.executeReply(
+                ReplyAttempt.create(replyText = "First", notificationKey = sharedKey),
+                sampleWear()
+            )
+        } catch (_: AssertionError) {
+            caughtError = true
+        }
+        assertTrue(caughtError)
         assertEquals(0, manager.activeInFlightCount())
 
         val subsequentResult = manager.executeReply(

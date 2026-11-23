@@ -102,6 +102,11 @@ class AiNotesViewModel(application: Application) : AndroidViewModel(application)
         val cleanText = noteText.trim()
         if (cleanText.isEmpty()) return
         val cleanSender = senderLabel.trim()
+        val normalizedKey = if (cleanSender.isNotEmpty()) {
+            com.parishod.watomatic.service.ai.AiPromptAndPolicyHelper.normalizeSenderKey(cleanSender, false)
+        } else {
+            ""
+        }
         viewModelScope.launch(Dispatchers.IO) {
             repository.insertNote(
                 AiNote(
@@ -110,7 +115,8 @@ class AiNotesViewModel(application: Application) : AndroidViewModel(application)
                     noteText = cleanText,
                     sourceMessage = "",
                     createdAt = System.currentTimeMillis(),
-                    isCompleted = false
+                    isCompleted = false,
+                    senderKey = normalizedKey
                 )
             )
         }

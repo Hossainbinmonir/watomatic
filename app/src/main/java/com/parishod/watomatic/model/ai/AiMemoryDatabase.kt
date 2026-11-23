@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AiNote::class,
         AiReplyLog::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AiMemoryDatabase : RoomDatabase() {
@@ -53,6 +53,23 @@ abstract class AiMemoryDatabase : RoomDatabase() {
             }
         }
 
+        @JvmField
+        val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `ai_notes` ADD COLUMN `sender_key` TEXT NOT NULL DEFAULT ''")
+                db.execSQL(
+                    "UPDATE `ai_notes` SET `sender_key` = CASE " +
+                        "WHEN TRIM(`sender_name`) = '' OR LOWER(TRIM(`sender_name`)) = 'unknown' THEN '__unknown_sender__' " +
+                        "ELSE LOWER(TRIM(`sender_name`)) " +
+                        "END"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_ai_notes_package_name_sender_key_is_completed` " +
+                        "ON `ai_notes` (`package_name`, `sender_key`, `is_completed`)"
+                )
+            }
+        }
+
         @Volatile
         private var instance: AiMemoryDatabase? = null
 
@@ -64,7 +81,7 @@ abstract class AiMemoryDatabase : RoomDatabase() {
                     AiMemoryDatabase::class.java,
                     DB_NAME
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { instance = it }
             }
@@ -76,6 +93,7 @@ abstract class AiMemoryDatabase : RoomDatabase() {
             synchronized(this) {
                 instance?.close()
                 instance = null
+                PendingPostDispatchMemoryStore.clearForTesting()
             }
         }
     }
