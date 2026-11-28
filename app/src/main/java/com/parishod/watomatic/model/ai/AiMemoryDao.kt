@@ -1,5 +1,6 @@
 package com.parishod.watomatic.model.ai
 
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -7,6 +8,12 @@ import androidx.room.Query
 import androidx.room.Transaction
 import com.parishod.watomatic.service.ai.AiPromptAndPolicyHelper
 import kotlinx.coroutines.flow.Flow
+
+data class ExpiredMemoryRowProjection(
+    val id: Long,
+    @ColumnInfo(name = "attempt_id")
+    val attemptId: String?
+)
 
 @Dao
 interface AiMemoryDao {
@@ -192,18 +199,53 @@ interface AiMemoryDao {
         protectedAttemptIds: List<String>
     ): Int
 
+    @Query("SELECT id, attempt_id FROM ai_conversation_messages WHERE timestamp <= :cutoffMs")
+    fun getExpiredConversationMessageIdsSync(cutoffMs: Long): List<ExpiredMemoryRowProjection>
+
+    @Query("DELETE FROM ai_conversation_messages WHERE id IN (:ids)")
+    fun deleteConversationMessagesByIdsSync(ids: List<Long>): Int
+
+    @Query("SELECT id, attempt_id FROM ai_notes WHERE created_at <= :cutoffMs")
+    fun getExpiredNoteIdsSync(cutoffMs: Long): List<ExpiredMemoryRowProjection>
+
+    @Query("DELETE FROM ai_notes WHERE id IN (:ids)")
+    fun deleteNotesByIdsSync(ids: List<Long>): Int
+
     @Transaction
     fun purgeExpiredMemorySync(cutoffMs: Long, protectedAttemptIds: List<String>): Int {
-        val deletedMsgs = if (protectedAttemptIds.isEmpty()) {
-            purgeExpiredConversationMessagesBeforeSync(cutoffMs)
-        } else {
-            purgeExpiredConversationMessagesExcludingSync(cutoffMs, protectedAttemptIds)
+        if (protectedAttemptIds.isEmpty()) {
+            val deletedMsgs = purgeExpiredConversationMessagesBeforeSync(cutoffMs)
+            val deletedNotes = purgeExpiredNotesBeforeSync(cutoffMs)
+            return deletedMsgs + deletedNotes
         }
-        val deletedNotes = if (protectedAttemptIds.isEmpty()) {
-            purgeExpiredNotesBeforeSync(cutoffMs)
-        } else {
-            purgeExpiredNotesExcludingSync(cutoffMs, protectedAttemptIds)
+        if (protectedAttemptIds.size <= MAX_DIRECT_BIND_IDS) {
+            val deletedMsgs = purgeExpiredConversationMessagesExcludingSync(cutoffMs, protectedAttemptIds)
+            val deletedNotes = purgeExpiredNotesExcludingSync(cutoffMs, protectedAttemptIds)
+            return deletedMsgs + deletedNotes
         }
+
+        val protectedSet = protectedAttemptIds.toHashSet()
+
+        val eligibleMessageIds = getExpiredConversationMessageIdsSync(cutoffMs)
+            .asSequence()
+            .filter { row -> row.attemptId == null || !protectedSet.contains(row.attemptId) }
+            .map { it.id }
+            .toList()
+        var deletedMsgs = 0
+        for (chunk in eligibleMessageIds.chunked(DELETE_CHUNK_SIZE)) {
+            deletedMsgs += deleteConversationMessagesByIdsSync(chunk)
+        }
+
+        val eligibleNoteIds = getExpiredNoteIdsSync(cutoffMs)
+            .asSequence()
+            .filter { row -> row.attemptId == null || !protectedSet.contains(row.attemptId) }
+            .map { it.id }
+            .toList()
+        var deletedNotes = 0
+        for (chunk in eligibleNoteIds.chunked(DELETE_CHUNK_SIZE)) {
+            deletedNotes += deleteNotesByIdsSync(chunk)
+        }
+
         return deletedMsgs + deletedNotes
     }
 
@@ -400,5 +442,10 @@ interface AiMemoryDao {
         }
 
         return insertedAny
+    }
+
+    companion object {
+        internal const val MAX_DIRECT_BIND_IDS = 900
+        internal const val DELETE_CHUNK_SIZE = 500
     }
 }

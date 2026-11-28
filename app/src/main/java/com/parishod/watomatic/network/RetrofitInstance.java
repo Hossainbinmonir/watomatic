@@ -1,10 +1,15 @@
 package com.parishod.watomatic.network;
 
+import androidx.annotation.VisibleForTesting;
+
 import com.parishod.watomatic.network.model.atomatic.AtomaticAIErrorResponse;
 import com.parishod.watomatic.network.model.openai.OpenAIErrorResponse;
 
 import java.io.IOException;
 import java.lang.annotation.Annotation;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.OkHttpClient;
@@ -16,51 +21,122 @@ import retrofit2.converter.scalars.ScalarsConverterFactory;
 // retrofit2.Response will be used with FQN
 
 public class RetrofitInstance {
-    private static Retrofit retrofit;
-    private static Retrofit openAIRetrofit;
-    private static Retrofit atomaticAIRetrofit;
+    private static final int MAX_CUSTOM_AI_RETROFIT_CACHE_SIZE = 16;
+    private static volatile Retrofit retrofit;
+    private static volatile Retrofit openAIRetrofit;
+    private static volatile Retrofit atomaticAIRetrofit;
+    private static volatile OkHttpClient sharedGithubOkHttpClient;
+    private static volatile OkHttpClient sharedAiOkHttpClient;
+    private static final Object GITHUB_LOCK = new Object();
+    private static final Object AI_LOCK = new Object();
+    private static final Map<String, Retrofit> customOpenAIRetrofitCache =
+            Collections.synchronizedMap(new LinkedHashMap<String, Retrofit>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Retrofit> eldest) {
+                    return size() > MAX_CUSTOM_AI_RETROFIT_CACHE_SIZE;
+                }
+            });
+
     private static final String BASE_URL = "https://api.github.com";
     public static final String OPENAI_BASE_URL = "https://api.openai.com/";
     public static final String ATOMATIC_AI_BASE_URL = "https://tsmnguqqaeot7avq35i7nbxch40wuowe.lambda-url.us-east-1.on.aws/";
 
-    public static Retrofit getRetrofitInstance() {
-        if (retrofit == null) {
-            OkHttpClient okHttpClient = new OkHttpClient.Builder()
-                    .build();
-
-            retrofit = new retrofit2.Retrofit.Builder()
-                    .baseUrl(BASE_URL)
-                    .addConverterFactory(ScalarsConverterFactory.create())
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .client(okHttpClient)
-                    .build();
+    private static OkHttpClient getSharedGithubOkHttpClient() {
+        OkHttpClient client = sharedGithubOkHttpClient;
+        if (client == null) {
+            synchronized (GITHUB_LOCK) {
+                client = sharedGithubOkHttpClient;
+                if (client == null) {
+                    client = new OkHttpClient.Builder().build();
+                    sharedGithubOkHttpClient = client;
+                }
+            }
         }
-        return retrofit;
+        return client;
+    }
+
+    @VisibleForTesting
+    public static OkHttpClient getSharedAiOkHttpClient() {
+        OkHttpClient client = sharedAiOkHttpClient;
+        if (client == null) {
+            synchronized (AI_LOCK) {
+                client = sharedAiOkHttpClient;
+                if (client == null) {
+                    client = new OkHttpClient.Builder()
+                            .connectTimeout(30, TimeUnit.SECONDS)
+                            .readTimeout(40, TimeUnit.SECONDS)
+                            .writeTimeout(30, TimeUnit.SECONDS)
+                            .callTimeout(45, TimeUnit.SECONDS)
+                            // AI completion POSTs are non-idempotent: never silently replay on socket failure.
+                            .retryOnConnectionFailure(false)
+                            .build();
+                    sharedAiOkHttpClient = client;
+                }
+            }
+        }
+        return client;
+    }
+
+    public static Retrofit getRetrofitInstance() {
+        Retrofit current = retrofit;
+        if (current == null) {
+            synchronized (GITHUB_LOCK) {
+                current = retrofit;
+                if (current == null) {
+                    current = new retrofit2.Retrofit.Builder()
+                            .baseUrl(BASE_URL)
+                            .addConverterFactory(ScalarsConverterFactory.create())
+                            .addConverterFactory(GsonConverterFactory.create())
+                            .client(getSharedGithubOkHttpClient())
+                            .build();
+                    retrofit = current;
+                }
+            }
+        }
+        return current;
     }
 
     public static Retrofit getOpenAIRetrofitInstance(String baseUrl) {
-        return createOpenAIRetrofitInstance(baseUrl);
+        if (baseUrl == null) {
+            return createOpenAIRetrofitInstance(null);
+        }
+        String normalizedKey = baseUrl.trim();
+        if (OPENAI_BASE_URL.equals(normalizedKey)) {
+            return getOpenAIRetrofitInstance();
+        }
+        Retrofit cached = customOpenAIRetrofitCache.get(normalizedKey);
+        if (cached != null) {
+            return cached;
+        }
+        synchronized (AI_LOCK) {
+            cached = customOpenAIRetrofitCache.get(normalizedKey);
+            if (cached == null) {
+                cached = createOpenAIRetrofitInstance(normalizedKey);
+                customOpenAIRetrofitCache.put(normalizedKey, cached);
+            }
+            return cached;
+        }
     }
 
     public static Retrofit getOpenAIRetrofitInstance() {
-        if (openAIRetrofit == null) {
-            openAIRetrofit = createOpenAIRetrofitInstance(OPENAI_BASE_URL);
+        Retrofit current = openAIRetrofit;
+        if (current == null) {
+            synchronized (AI_LOCK) {
+                current = openAIRetrofit;
+                if (current == null) {
+                    current = createOpenAIRetrofitInstance(OPENAI_BASE_URL);
+                    openAIRetrofit = current;
+                }
+            }
         }
-        return openAIRetrofit;
+        return current;
     }
 
     private static Retrofit createOpenAIRetrofitInstance(String baseUrl) {
-        OkHttpClient okHttpClient = new OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(40, TimeUnit.SECONDS)
-                .writeTimeout(30, TimeUnit.SECONDS)
-                .callTimeout(45, TimeUnit.SECONDS)
-                .build();
-
         return new Retrofit.Builder()
                 .baseUrl(baseUrl)
                 .addConverterFactory(GsonConverterFactory.create()) // Only Gson for OpenAI
-                .client(okHttpClient)
+                .client(getSharedAiOkHttpClient())
                 .build();
     }
 
@@ -92,21 +168,21 @@ public class RetrofitInstance {
     }
 
     public static Retrofit getAtomaticAIRetrofitInstance() {
-        if (atomaticAIRetrofit == null) {
-            OkHttpClient okHttpClient = new OkHttpClient.Builder()
-                    .connectTimeout(30, TimeUnit.SECONDS)
-                    .readTimeout(40, TimeUnit.SECONDS)
-                    .writeTimeout(30, TimeUnit.SECONDS)
-                    .callTimeout(45, TimeUnit.SECONDS)
-                    .build();
-
-            atomaticAIRetrofit = new Retrofit.Builder()
-                    .baseUrl(ATOMATIC_AI_BASE_URL)
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .client(okHttpClient)
-                    .build();
+        Retrofit current = atomaticAIRetrofit;
+        if (current == null) {
+            synchronized (AI_LOCK) {
+                current = atomaticAIRetrofit;
+                if (current == null) {
+                    current = new Retrofit.Builder()
+                            .baseUrl(ATOMATIC_AI_BASE_URL)
+                            .addConverterFactory(GsonConverterFactory.create())
+                            .client(getSharedAiOkHttpClient())
+                            .build();
+                    atomaticAIRetrofit = current;
+                }
+            }
         }
-        return atomaticAIRetrofit;
+        return current;
     }
 
     public static AtomaticAIErrorResponse parseAtomaticAIError(retrofit2.Response<?> response) {

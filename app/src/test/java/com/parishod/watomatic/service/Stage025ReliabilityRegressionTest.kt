@@ -663,15 +663,20 @@ class Stage025ReliabilityRegressionTest {
     }
 
     @Test
-    fun `PendingClaimHandoff capacity overflow evicts oldest entry without wiping active tokens`() {
+    fun `PendingClaimHandoff preserves over 512 active tokens and cleans up expired entries`() {
         PendingClaimHandoff.clear()
+        val now = 10_000L
         for (i in 1..600) {
-            PendingClaimHandoff.register("evt-handoff-$i", "tok-$i")
+            PendingClaimHandoff.register("evt-handoff-$i", "tok-$i", nowMs = now, ttlMs = 60_000L)
         }
-        // Oldest entries (1..88) were evicted; recent entries remain intact
-        assertNull(PendingClaimHandoff.peek("evt-handoff-1"))
-        assertEquals("tok-600", PendingClaimHandoff.consume("evt-handoff-600"))
-        assertEquals("tok-599", PendingClaimHandoff.consume("evt-handoff-599"))
+        // Active entries beyond 512 MUST NOT be evicted
+        assertEquals("tok-1", PendingClaimHandoff.peek("evt-handoff-1", nowMs = now + 1_000L))
+        assertEquals("tok-600", PendingClaimHandoff.consume("evt-handoff-600", nowMs = now + 1_000L))
+        assertEquals("tok-599", PendingClaimHandoff.consume("evt-handoff-599", nowMs = now + 1_000L))
+        // Expired entries are purged safely once TTL elapses
+        val purged = PendingClaimHandoff.purgeExpired(nowMs = now + 60_001L)
+        assertEquals(598, purged)
+        assertNull(PendingClaimHandoff.peek("evt-handoff-1", nowMs = now + 60_001L))
         PendingClaimHandoff.clear()
     }
 

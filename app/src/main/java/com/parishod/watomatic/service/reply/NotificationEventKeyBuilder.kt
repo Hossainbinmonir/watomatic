@@ -39,20 +39,19 @@ object NotificationEventKeyBuilder {
             "id:${sbn.id}|t:$sbnTag"
         }
 
-        val whenMs = notification?.`when` ?: 0L
-        val postTimeMs = sbn.postTime
-        val effectiveTimestampMs = when {
-            whenMs > 0L -> whenMs
-            postTimeMs > 0L -> postTimeMs
-            else -> 0L
-        }
-
         val isGroup = extras?.getBoolean("android.isGroupConversation", false) ?: false
         val rawSender = runCatching { NotificationUtils.getTitle(sbn) }.getOrNull()
         val senderNormalized = normalizeSenderKey(rawSender, isGroup)
 
         val extractedMessage = extractIncomingMessage(sbn) ?: fallbackIncomingMessage
         val normalizedMessage = normalizeMessage(extractedMessage)
+
+        val effectiveTimestampMs = resolveStableTimestampMs(
+            notification = notification,
+            extras = extras,
+            postTimeMs = sbn.postTime,
+            normalizedMessage = normalizedMessage
+        )
 
         val canonical = buildString {
             append(normalizedPackage).append('|')
@@ -63,6 +62,86 @@ object NotificationEventKeyBuilder {
             append(normalizedMessage)
         }
         return "evt_${sha256Hex(canonical)}"
+    }
+
+    /**
+     * Resolves the most stable message timestamp available on the notification:
+     * 1. Positive per-message `"time"` from MessagingStyle `"android.messages"` (preferring the
+     *    latest entry matching [normalizedMessage], else latest positive `"time"`).
+     * 2. Explicit `notification.when` when `> 0L`.
+     * 3. Positive `"time"` from `"android.messages.historic"`.
+     * 4. Last-resort fallback to `sbn.postTime` (`> 0L`) when the posting app supplies neither
+     *    `notification.when` nor MessagingStyle message timestamps (unavoidable Android limitation:
+     *    if an app omits both and reposts identical text with a mutated `postTime`, keys differ
+     *    rather than risking false suppression across distinct identical messages).
+     */
+    @JvmStatic
+    internal fun resolveStableTimestampMs(
+        notification: Notification?,
+        extras: Bundle?,
+        postTimeMs: Long,
+        normalizedMessage: String
+    ): Long {
+        val messagingTimeMs = extractMessagingStyleTimestampMs(extras, "android.messages", normalizedMessage)
+        if (messagingTimeMs > 0L) {
+            return messagingTimeMs
+        }
+
+        val whenMs = notification?.`when` ?: 0L
+        if (whenMs > 0L) {
+            return whenMs
+        }
+
+        val historicTimeMs = extractMessagingStyleTimestampMs(extras, "android.messages.historic", normalizedMessage)
+        if (historicTimeMs > 0L) {
+            return historicTimeMs
+        }
+
+        return if (postTimeMs > 0L) postTimeMs else 0L
+    }
+
+    private fun extractMessagingStyleTimestampMs(
+        extras: Bundle?,
+        extraKey: String,
+        normalizedMessage: String
+    ): Long {
+        if (extras == null) return 0L
+        @Suppress("DEPRECATION")
+        val messages: Array<Parcelable>? = runCatching { extras.getParcelableArray(extraKey) }.getOrNull()
+        if (messages.isNullOrEmpty()) return 0L
+
+        var latestPositiveTime = 0L
+        for (i in messages.indices.reversed()) {
+            val msgBundle = messages[i] as? Bundle ?: continue
+            val msgTime = readBundlePositiveTimestamp(msgBundle, "time")
+            if (msgTime <= 0L) continue
+            if (latestPositiveTime <= 0L) {
+                latestPositiveTime = msgTime
+            }
+            if (normalizedMessage.isNotEmpty()) {
+                val msgText = normalizeMessage(msgBundle.getCharSequence("text")?.toString())
+                if (msgText == normalizedMessage) {
+                    return msgTime
+                }
+            } else {
+                return msgTime
+            }
+        }
+        return latestPositiveTime
+    }
+
+    private fun readBundlePositiveTimestamp(bundle: Bundle, key: String): Long {
+        return try {
+            @Suppress("DEPRECATION")
+            val raw = bundle.get(key)
+            val parsed = when (raw) {
+                is Number -> raw.toLong()
+                else -> 0L
+            }
+            if (parsed > 0L) parsed else 0L
+        } catch (_: Exception) {
+            0L
+        }
     }
 
     @JvmStatic

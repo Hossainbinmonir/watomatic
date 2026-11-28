@@ -1,7 +1,10 @@
 package com.parishod.watomatic.service.reply
 
+import android.service.notification.StatusBarNotification
+import com.parishod.watomatic.NotificationWear
 import com.parishod.watomatic.model.logs.NotificationDispatchClaimEntity
 import com.parishod.watomatic.model.logs.ReplyAttemptEntity
+import com.parishod.watomatic.model.utils.NotificationUtils
 
 enum class RetryDecision {
     ALLOW_NEW_EVENT,
@@ -11,6 +14,7 @@ enum class RetryDecision {
     DENY_CANCELLED_OR_STALE,
     DENY_IN_FLIGHT,
     DENY_DUPLICATE_PRE_DISPATCH_FAILURE,
+    DENY_RETRY_LIMIT_EXCEEDED,
     DENY_DUPLICATE_CALLBACK,
     DENY_SERVICE_SHUTDOWN,
     DENY_MISSING_CAPABILITY,
@@ -21,10 +25,34 @@ enum class RetryDecision {
  * Explicit retry and duplicate-prevention policy covering every [ReplyExecutionStatus].
  */
 object ReplyRetryPolicy {
+    const val MAX_PRE_DISPATCH_RETRIES = 2
 
     @JvmStatic
     fun isDecisionAllowed(decision: RetryDecision): Boolean =
         decision == RetryDecision.ALLOW_NEW_EVENT || decision == RetryDecision.ALLOW_AUTHORIZED_RETRY
+
+    @JvmStatic
+    fun hasValidWearReplyCapability(notificationWear: NotificationWear?): Boolean {
+        if (notificationWear == null || notificationWear.pendingIntent == null) {
+            return false
+        }
+        val remoteInputs = notificationWear.remoteInputs ?: return false
+        return remoteInputs.any { it.allowFreeFormInput }
+    }
+
+    @JvmStatic
+    fun hasValidReplyCapability(
+        sbn: StatusBarNotification?,
+        notificationWear: NotificationWear?
+    ): Boolean {
+        if (sbn == null || sbn.notification == null) {
+            return false
+        }
+        if (!NotificationUtils.isNewNotification(sbn)) {
+            return false
+        }
+        return hasValidWearReplyCapability(notificationWear)
+    }
 
     @JvmStatic
     @JvmOverloads
@@ -50,7 +78,10 @@ object ReplyRetryPolicy {
             ReplyExecutionStatus.GENERATED.name,
             ReplyExecutionStatus.DISPATCHING.name -> RetryDecision.DENY_IN_FLIGHT
             ReplyExecutionStatus.FAILED.name -> {
-                if (!existingClaim.dispatchAttempted && allowRetryOnPreDispatchFailure) {
+                if (!existingClaim.dispatchAttempted &&
+                    !existingClaim.dispatchedNormally &&
+                    allowRetryOnPreDispatchFailure
+                ) {
                     RetryDecision.ALLOW_AUTHORIZED_RETRY
                 } else {
                     RetryDecision.DENY_DUPLICATE_PRE_DISPATCH_FAILURE
@@ -83,7 +114,10 @@ object ReplyRetryPolicy {
             ReplyExecutionStatus.GENERATED.name,
             ReplyExecutionStatus.DISPATCHING.name -> RetryDecision.DENY_IN_FLIGHT
             ReplyExecutionStatus.FAILED.name -> {
-                if (!priorAttempt.dispatchAttempted && allowRetryOnPreDispatchFailure) {
+                if (!priorAttempt.dispatchAttempted &&
+                    !priorAttempt.dispatchedNormally &&
+                    allowRetryOnPreDispatchFailure
+                ) {
                     RetryDecision.ALLOW_AUTHORIZED_RETRY
                 } else {
                     RetryDecision.DENY_DUPLICATE_PRE_DISPATCH_FAILURE
@@ -92,6 +126,148 @@ object ReplyRetryPolicy {
             else -> RetryDecision.DENY_UNKNOWN_OUTCOME
         }
     }
+
+    /**
+     * Authoritative cross-table pre-dispatch retry evaluation.
+     *
+     * Allows retry ONLY when:
+     * - Service is live, notification is fresh, and valid free-form reply capability exists.
+     * - Existing claim is strictly `FAILED` with `dispatch_attempted == false`.
+     * - Every correlated [ReplyAttemptEntity] for the claim/event agrees (no `DISPATCHED`,
+     *   `UNKNOWN`, `CANCELLED`, in-flight `GENERATED`/`DISPATCHING`, or `dispatchAttempted == true`).
+     * - Prior retry count is strictly below [maxRetries].
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun evaluateAuthorizedPreDispatchRetry(
+        existingClaim: NotificationDispatchClaimEntity?,
+        linkedAttempt: ReplyAttemptEntity?,
+        attemptsForEventKey: List<ReplyAttemptEntity>,
+        retryCountAlreadyUsed: Int,
+        maxRetries: Int = MAX_PRE_DISPATCH_RETRIES,
+        isServiceShutdown: Boolean = false,
+        isStaleNotification: Boolean = false,
+        hasValidReplyCapability: Boolean = true
+    ): RetryDecision {
+        if (isServiceShutdown) return RetryDecision.DENY_SERVICE_SHUTDOWN
+        if (isStaleNotification) return RetryDecision.DENY_CANCELLED_OR_STALE
+        if (!hasValidReplyCapability) return RetryDecision.DENY_MISSING_CAPABILITY
+        val failedCountInDb = attemptsForEventKey.count {
+            it.status == ReplyExecutionStatus.FAILED.name &&
+                !it.dispatchAttempted &&
+                !it.dispatchedNormally
+        }
+        val effectiveRetriesUsed = maxOf(retryCountAlreadyUsed, maxOf(0, failedCountInDb - 1))
+
+        if (existingClaim == null) {
+            val eventBlock = evaluateAttemptsBlockingStatus(attemptsForEventKey)
+            if (eventBlock != null) {
+                return eventBlock
+            }
+            if (failedCountInDb == 0 && retryCountAlreadyUsed <= 0) {
+                return RetryDecision.ALLOW_NEW_EVENT
+            }
+            if (effectiveRetriesUsed >= maxRetries) {
+                return RetryDecision.DENY_RETRY_LIMIT_EXCEEDED
+            }
+            return RetryDecision.ALLOW_AUTHORIZED_RETRY
+        }
+
+        val claimDecision = evaluateClaimConflict(
+            existingClaim = existingClaim,
+            allowRetryOnPreDispatchFailure = true,
+            isServiceShutdown = false,
+            isDuplicateCallback = false,
+            isStaleNotification = false,
+            hasValidReplyCapability = true
+        )
+        if (claimDecision != RetryDecision.ALLOW_AUTHORIZED_RETRY) {
+            return claimDecision
+        }
+
+        if (linkedAttempt != null) {
+            val linkedDecision = evaluateAttemptStatus(
+                priorAttempt = linkedAttempt,
+                allowRetryOnPreDispatchFailure = true,
+                isServiceShutdown = false,
+                isDuplicateCallback = false,
+                isStaleNotification = false,
+                hasValidReplyCapability = true
+            )
+            if (linkedDecision != RetryDecision.ALLOW_AUTHORIZED_RETRY) {
+                return linkedDecision
+            }
+        }
+
+        val eventBlock = evaluateAttemptsBlockingStatus(attemptsForEventKey)
+        if (eventBlock != null) {
+            return eventBlock
+        }
+
+        if (effectiveRetriesUsed >= maxRetries) {
+            return RetryDecision.DENY_RETRY_LIMIT_EXCEEDED
+        }
+
+        return RetryDecision.ALLOW_AUTHORIZED_RETRY
+    }
+
+    @JvmStatic
+    fun evaluateAttemptsBlockingStatus(
+        attempts: List<ReplyAttemptEntity>
+    ): RetryDecision? {
+        if (attempts.isEmpty()) return null
+        if (attempts.any { it.status == ReplyExecutionStatus.DISPATCHED.name }) {
+            return RetryDecision.DENY_ALREADY_DISPATCHED
+        }
+        if (attempts.any {
+                it.status == ReplyExecutionStatus.UNKNOWN.name ||
+                    !isKnownExecutionStatus(it.status)
+            }
+        ) {
+            return RetryDecision.DENY_UNKNOWN_OUTCOME
+        }
+        if (attempts.any {
+                it.status == ReplyExecutionStatus.GENERATED.name ||
+                    it.status == ReplyExecutionStatus.DISPATCHING.name
+            }
+        ) {
+            return RetryDecision.DENY_IN_FLIGHT
+        }
+        if (attempts.any {
+                it.status == ReplyExecutionStatus.FAILED.name &&
+                    (it.dispatchAttempted || it.dispatchedNormally)
+            }
+        ) {
+            return RetryDecision.DENY_DUPLICATE_PRE_DISPATCH_FAILURE
+        }
+        if (attempts.any { it.status == ReplyExecutionStatus.CANCELLED.name }) {
+            return RetryDecision.DENY_CANCELLED_OR_STALE
+        }
+        return null
+    }
+
+    @JvmStatic
+    fun evaluateCrossTableAttemptEvidence(
+        attempts: List<ReplyAttemptEntity>,
+        allowRetryOnPreDispatchFailure: Boolean
+    ): RetryDecision? {
+        if (attempts.isEmpty()) return null
+        val blocker = evaluateAttemptsBlockingStatus(attempts)
+        if (blocker != null) return blocker
+        return if (allowRetryOnPreDispatchFailure) {
+            RetryDecision.ALLOW_AUTHORIZED_RETRY
+        } else {
+            RetryDecision.DENY_DUPLICATE_PRE_DISPATCH_FAILURE
+        }
+    }
+
+    private fun isKnownExecutionStatus(status: String): Boolean =
+        status == ReplyExecutionStatus.DISPATCHED.name ||
+            status == ReplyExecutionStatus.UNKNOWN.name ||
+            status == ReplyExecutionStatus.GENERATED.name ||
+            status == ReplyExecutionStatus.DISPATCHING.name ||
+            status == ReplyExecutionStatus.CANCELLED.name ||
+            status == ReplyExecutionStatus.FAILED.name
 
     @JvmStatic
     fun failureCategoryForDenial(decision: RetryDecision): String = when (decision) {

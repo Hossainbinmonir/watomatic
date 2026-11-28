@@ -162,13 +162,13 @@ class NotificationReplyRecoveryAndClaimTest {
             )
         }
 
-        // Unresolved rows from simulated crash
-        insertAttempt("att-gen", "evt_gen", ReplyExecutionStatus.GENERATED, false, false)
+        // Unresolved rows from simulated crash (claim acquired before attempt transition, matching production ordering)
         assertTrue(dbUtils.tryAcquireNotificationClaim("evt_gen", "att-gen", "com.whatsapp", "s", "nk-gen", 1000L, false).acquired)
+        insertAttempt("att-gen", "evt_gen", ReplyExecutionStatus.GENERATED, false, false)
         assertEquals(1, dbUtils.updateNotificationClaimTransition("evt_gen", "att-gen", "att-gen", ReplyExecutionStatus.GENERATED, 1005L))
 
-        insertAttempt("att-disp", "evt_disp", ReplyExecutionStatus.DISPATCHING, true, false)
         assertTrue(dbUtils.tryAcquireNotificationClaim("evt_disp", "att-disp", "com.whatsapp", "s", "nk-disp", 1000L, false).acquired)
+        insertAttempt("att-disp", "evt_disp", ReplyExecutionStatus.DISPATCHING, true, false)
         assertEquals(1, dbUtils.updateNotificationClaimTransition("evt_disp", "att-disp", "att-disp", ReplyExecutionStatus.DISPATCHING, 1005L))
 
         // Orphan CLAIMED row with no ReplyAttemptEntity yet
@@ -296,6 +296,7 @@ class NotificationReplyRecoveryAndClaimTest {
         val attemptDao = db.replyAttemptDao()
         val claimDao = db.notificationDispatchClaimDao()
 
+        assertTrue(dbUtils.tryAcquireNotificationClaim("evt_mismatch_gen", "att-mismatch-gen", "com.whatsapp", "bob", "nk-mismatch-gen", 1000L, false).acquired)
         attemptDao.upsertAttemptSafely(
             ReplyAttemptEntity(
                 attemptId = "att-mismatch-gen",
@@ -315,7 +316,6 @@ class NotificationReplyRecoveryAndClaimTest {
                 updatedAtMs = 1000L
             )
         )
-        assertTrue(dbUtils.tryAcquireNotificationClaim("evt_mismatch_gen", "att-mismatch-gen", "com.whatsapp", "bob", "nk-mismatch-gen", 1000L, false).acquired)
         assertEquals(1, dbUtils.updateNotificationClaimTransition("evt_mismatch_gen", "att-mismatch-gen", "att-mismatch-gen", ReplyExecutionStatus.DISPATCHING, 1010L))
 
         val summary = NotificationReplyRecoveryManager.recoverOnStartup(context, 50_000L)

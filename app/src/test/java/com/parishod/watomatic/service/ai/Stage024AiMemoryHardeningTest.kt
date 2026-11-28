@@ -88,6 +88,7 @@ class Stage024AiMemoryHardeningTest {
         memoryDb = AiMemoryDatabase.getInstance(context)
         logsDb = MessageLogsDB.getInstance(context)
         service = Robolectric.buildService(NotificationService::class.java).create().get()
+        awaitMemory()
     }
 
     @After

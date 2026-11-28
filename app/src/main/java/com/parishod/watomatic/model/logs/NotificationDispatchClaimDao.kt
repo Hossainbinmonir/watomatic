@@ -60,26 +60,68 @@ interface NotificationDispatchClaimDao {
         expiresAtMs: Long
     ): Int
 
+    @Query("SELECT * FROM reply_attempts WHERE event_key = :eventKey ORDER BY created_at_ms DESC")
+    fun getAttemptsForEventKeySync(eventKey: String): List<ReplyAttemptEntity>
+
     @Transaction
     fun tryAcquireClaimSync(
         newClaim: NotificationDispatchClaimEntity,
         allowRetryOnPreDispatchFailure: Boolean = false
     ): ClaimAcquireOutcome {
         val insertedRowId = insertClaimIgnoreSync(newClaim)
+        val attemptsForEvent = getAttemptsForEventKeySync(newClaim.eventKey)
         if (insertedRowId > 0L) {
+            val attemptDecision = ReplyRetryPolicy.evaluateCrossTableAttemptEvidence(
+                attempts = attemptsForEvent,
+                allowRetryOnPreDispatchFailure = allowRetryOnPreDispatchFailure
+            )
+            if (attemptDecision == null) {
+                return ClaimAcquireOutcome(
+                    acquired = true,
+                    claim = newClaim,
+                    decision = RetryDecision.ALLOW_NEW_EVENT
+                )
+            }
+            if (attemptDecision == RetryDecision.ALLOW_AUTHORIZED_RETRY) {
+                return ClaimAcquireOutcome(
+                    acquired = true,
+                    claim = newClaim,
+                    decision = RetryDecision.ALLOW_AUTHORIZED_RETRY
+                )
+            }
+            deleteUnusedClaimByTokenSync(newClaim.eventKey, newClaim.attemptId)
             return ClaimAcquireOutcome(
-                acquired = true,
-                claim = newClaim,
-                decision = RetryDecision.ALLOW_NEW_EVENT
+                acquired = false,
+                claim = null,
+                decision = attemptDecision
             )
         }
 
         val existing = getClaimByEventKeySync(newClaim.eventKey)
-        val decision = ReplyRetryPolicy.evaluateClaimConflict(
+        val claimDecision = ReplyRetryPolicy.evaluateClaimConflict(
             existingClaim = existing,
             allowRetryOnPreDispatchFailure = allowRetryOnPreDispatchFailure
         )
-        if (decision == RetryDecision.ALLOW_AUTHORIZED_RETRY && existing != null) {
+        if (claimDecision == RetryDecision.DENY_ALREADY_DISPATCHED ||
+            claimDecision == RetryDecision.DENY_UNKNOWN_OUTCOME
+        ) {
+            return ClaimAcquireOutcome(
+                acquired = false,
+                claim = existing,
+                decision = claimDecision
+            )
+        }
+
+        val attemptBlocker = ReplyRetryPolicy.evaluateAttemptsBlockingStatus(attemptsForEvent)
+        if (attemptBlocker != null) {
+            return ClaimAcquireOutcome(
+                acquired = false,
+                claim = existing,
+                decision = attemptBlocker
+            )
+        }
+
+        if (claimDecision == RetryDecision.ALLOW_AUTHORIZED_RETRY && existing != null) {
             val updated = reclaimFailedPreDispatchSync(
                 eventKey = existing.eventKey,
                 newAttemptId = newClaim.attemptId,
@@ -88,6 +130,7 @@ interface NotificationDispatchClaimDao {
                 expiresAtMs = newClaim.expiresAtMs
             )
             if (updated == 1) {
+                recordPriorFailedSnapshot(existing, newClaim.attemptId)
                 return ClaimAcquireOutcome(
                     acquired = true,
                     claim = getClaimByEventKeySync(existing.eventKey),
@@ -104,7 +147,7 @@ interface NotificationDispatchClaimDao {
         return ClaimAcquireOutcome(
             acquired = false,
             claim = existing,
-            decision = decision
+            decision = claimDecision
         )
     }
 
@@ -137,7 +180,68 @@ interface NotificationDispatchClaimDao {
         "DELETE FROM notification_dispatch_claims " +
             "WHERE event_key = :eventKey AND attempt_id = :claimToken AND claim_status = 'CLAIMED'"
     )
-    fun releaseUnusedClaimSync(eventKey: String, claimToken: String): Int
+    fun deleteUnusedClaimByTokenSync(eventKey: String, claimToken: String): Int
+
+    @Query(
+        "UPDATE notification_dispatch_claims SET " +
+            "attempt_id = :restoredAttemptId, " +
+            "claim_status = 'FAILED', " +
+            "failure_category = :failureCategory, " +
+            "dispatch_attempted = 0, " +
+            "dispatched_normally = 0, " +
+            "updated_at_ms = :updatedAtMs, " +
+            "expires_at_ms = :expiresAtMs " +
+            "WHERE event_key = :eventKey " +
+            "AND attempt_id = :expectedClaimToken " +
+            "AND claim_status = 'CLAIMED'"
+    )
+    fun restorePriorFailedClaimSync(
+        eventKey: String,
+        expectedClaimToken: String,
+        restoredAttemptId: String,
+        failureCategory: String?,
+        updatedAtMs: Long,
+        expiresAtMs: Long
+    ): Int
+
+    @Transaction
+    fun releaseUnusedClaimSync(eventKey: String, claimToken: String): Int {
+        val snapshot = consumePriorFailedSnapshot(eventKey, claimToken)
+        val current = getClaimByEventKeySync(eventKey)
+        if (current == null ||
+            current.attemptId != claimToken ||
+            current.claimStatus != NotificationDispatchClaimEntity.STATUS_CLAIMED
+        ) {
+            return 0
+        }
+        val priorAttempt = getAttemptsForEventKeySync(eventKey).firstOrNull { attempt ->
+            attempt.attemptId != claimToken &&
+                attempt.status == ReplyExecutionStatus.FAILED.name &&
+                !attempt.dispatchAttempted &&
+                !attempt.dispatchedNormally
+        }
+        if (snapshot != null) {
+            return restorePriorFailedClaimSync(
+                eventKey = eventKey,
+                expectedClaimToken = claimToken,
+                restoredAttemptId = snapshot.attemptId,
+                failureCategory = snapshot.failureCategory,
+                updatedAtMs = snapshot.updatedAtMs,
+                expiresAtMs = snapshot.expiresAtMs
+            )
+        }
+        if (priorAttempt != null) {
+            return restorePriorFailedClaimSync(
+                eventKey = eventKey,
+                expectedClaimToken = claimToken,
+                restoredAttemptId = priorAttempt.attemptId,
+                failureCategory = priorAttempt.failureCategory,
+                updatedAtMs = priorAttempt.updatedAtMs,
+                expiresAtMs = priorAttempt.updatedAtMs + NotificationDispatchClaimEntity.DEFAULT_RESOLVED_TTL_MS
+            )
+        }
+        return deleteUnusedClaimByTokenSync(eventKey, claimToken)
+    }
 
     @Query(
         "UPDATE notification_dispatch_claims SET " +
@@ -210,4 +314,65 @@ interface NotificationDispatchClaimDao {
 
     @Query("DELETE FROM notification_dispatch_claims")
     fun clearAllClaimsSync()
+
+    companion object {
+        private const val MAX_STASH_ENTRIES = 1024
+
+        private data class PriorFailedSnapshot(
+            val attemptId: String,
+            val failureCategory: String?,
+            val updatedAtMs: Long,
+            val expiresAtMs: Long
+        )
+
+        private val stashLock = Any()
+        private val priorFailedSnapshots = LinkedHashMap<String, PriorFailedSnapshot>(64, 0.75f, false)
+
+        @JvmStatic
+        fun recordPriorFailedSnapshot(
+            priorClaim: NotificationDispatchClaimEntity,
+            newClaimToken: String
+        ) {
+            if (priorClaim.eventKey.isBlank() || newClaimToken.isBlank()) return
+            val key = "${priorClaim.eventKey}|$newClaimToken"
+            synchronized(stashLock) {
+                if (priorFailedSnapshots.size >= MAX_STASH_ENTRIES && !priorFailedSnapshots.containsKey(key)) {
+                    val eldest = priorFailedSnapshots.entries.firstOrNull()?.key
+                    if (eldest != null) {
+                        priorFailedSnapshots.remove(eldest)
+                    }
+                }
+                priorFailedSnapshots[key] = PriorFailedSnapshot(
+                    attemptId = priorClaim.attemptId,
+                    failureCategory = priorClaim.failureCategory,
+                    updatedAtMs = priorClaim.updatedAtMs,
+                    expiresAtMs = priorClaim.expiresAtMs
+                )
+            }
+        }
+
+        @JvmStatic
+        fun clearPriorFailedSnapshot(eventKey: String?, claimToken: String?) {
+            if (eventKey.isNullOrBlank() || claimToken.isNullOrBlank()) return
+            val key = "$eventKey|$claimToken"
+            synchronized(stashLock) {
+                priorFailedSnapshots.remove(key)
+            }
+        }
+
+        private fun consumePriorFailedSnapshot(eventKey: String, claimToken: String): PriorFailedSnapshot? {
+            if (eventKey.isBlank() || claimToken.isBlank()) return null
+            val key = "$eventKey|$claimToken"
+            synchronized(stashLock) {
+                return priorFailedSnapshots.remove(key)
+            }
+        }
+
+        @JvmStatic
+        fun clearAllPriorFailedSnapshotsForTesting() {
+            synchronized(stashLock) {
+                priorFailedSnapshots.clear()
+            }
+        }
+    }
 }

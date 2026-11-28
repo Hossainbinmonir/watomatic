@@ -228,4 +228,70 @@ class RetrofitInstanceTest {
         assertEquals(30_000, atomaticClient.writeTimeoutMillis)
         assertEquals(45_000, atomaticClient.callTimeoutMillis)
     }
+
+    @Test
+    fun `AI Retrofit instances share thread-safe OkHttpClient with retryOnConnectionFailure disabled`() {
+        val shared = RetrofitInstance.getSharedAiOkHttpClient()
+        val defaultOpenAi = RetrofitInstance.getOpenAIRetrofitInstance().callFactory() as OkHttpClient
+        val customOpenAi = RetrofitInstance.getOpenAIRetrofitInstance("https://cached.example.com/v1/").callFactory() as OkHttpClient
+        val atomatic = RetrofitInstance.getAtomaticAIRetrofitInstance().callFactory() as OkHttpClient
+
+        assertSame(shared, defaultOpenAi)
+        assertSame(shared, customOpenAi)
+        assertSame(shared, atomatic)
+        assertFalse(
+            "AI client must disable automatic retries for non-idempotent POST completions",
+            shared.retryOnConnectionFailure
+        )
+    }
+
+    @Test
+    fun `getOpenAIRetrofitInstance reuses cached Retrofit instance for identical custom URL`() {
+        val url = "https://repeat-cache-test.example.com/v1/"
+        val first = RetrofitInstance.getOpenAIRetrofitInstance(url)
+        val second = RetrofitInstance.getOpenAIRetrofitInstance(" $url ")
+        assertSame(first, second)
+    }
+
+    @Test
+    fun `shared AI OkHttpClient does not retry non-idempotent POST when socket closes prematurely`() {
+        val serverHits = java.util.concurrent.atomic.AtomicInteger(0)
+        val serverSocket = java.net.ServerSocket(0, 8, java.net.InetAddress.getByName("127.0.0.1"))
+        val pool = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val running = java.util.concurrent.atomic.AtomicBoolean(true)
+        pool.execute {
+            while (running.get()) {
+                try {
+                    val sock = serverSocket.accept()
+                    serverHits.incrementAndGet()
+                    sock.use {
+                        // Drop socket without HTTP response to simulate transport failure after POST write
+                    }
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }
+
+        try {
+            val baseUrl = "http://127.0.0.1:${serverSocket.localPort}/"
+            val service = RetrofitInstance.getOpenAIRetrofitInstance(baseUrl).create(OpenAIService::class.java)
+            val request = com.parishod.watomatic.network.model.openai.OpenAIRequest(
+                "mock-model",
+                listOf(com.parishod.watomatic.network.model.openai.Message("user", "Hello"))
+            )
+            var threwIo = false
+            try {
+                service.getChatCompletion("${baseUrl}v1/chat/completions", "Bearer test-key", request).execute()
+            } catch (_: java.io.IOException) {
+                threwIo = true
+            }
+            assertTrue("Premature socket close must fail rather than silently succeeding", threwIo)
+            assertEquals("OkHttp must hit non-idempotent AI POST endpoint only once", 1, serverHits.get())
+        } finally {
+            running.set(false)
+            runCatching { serverSocket.close() }
+            pool.shutdownNow()
+        }
+    }
 }

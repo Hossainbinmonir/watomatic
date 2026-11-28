@@ -1,7 +1,6 @@
 package com.parishod.watomatic.service;
 
 import android.service.notification.StatusBarNotification;
-import android.text.SpannableString;
 
 import com.parishod.watomatic.model.preferences.PreferencesManager;
 import com.parishod.watomatic.model.utils.ContactsHelper;
@@ -88,13 +87,12 @@ public class NotificationReplyDecider {
     }
 
     boolean isGroupMessageAndReplyAllowed(StatusBarNotification sbn) {
+        if (sbn == null || sbn.getNotification() == null || sbn.getNotification().extras == null) {
+            return true;
+        }
         String rawTitle = NotificationUtils.getTitleRaw(sbn);
-        SpannableString rawText = SpannableString.valueOf(
-                "" + sbn.getNotification().extras.get("android.text"));
-
-        boolean isPossiblyAnImageGrpMsg =
-                ((rawTitle != null) && (": ".contains(rawTitle) || "@ ".contains(rawTitle)))
-                        && ((rawText != null) && rawText.toString().contains("\uD83D\uDCF7"));
+        Object rawTextObj = sbn.getNotification().extras.get("android.text");
+        boolean isPossiblyAnImageGrpMsg = NotificationUtils.isPossiblyImageGroupMessage(rawTitle, rawTextObj);
 
         if (!sbn.getNotification().extras.getBoolean("android.isGroupConversation")) {
             return !isPossiblyAnImageGrpMsg;

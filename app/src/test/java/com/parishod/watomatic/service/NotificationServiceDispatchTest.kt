@@ -893,12 +893,12 @@ class NotificationServiceDispatchTest {
                 senderName: String?,
                 incomingMsg: String?,
                 sbn: StatusBarNotification?
-            ) {
+            ): com.parishod.watomatic.model.logs.AttemptClaimPersistOutcome {
                 if (!threwOnce) {
                     threwOnce = true
                     throw IllegalStateException("Simulated transient claim transaction failure")
                 }
-                super.recordAttemptAndClaimResult(eventKey, attempt, result, senderName, incomingMsg, sbn)
+                return super.recordAttemptAndClaimResult(eventKey, attempt, result, senderName, incomingMsg, sbn)
             }
         }
         service.setDbUtilsForTesting(failFirstTransactionDbUtils)

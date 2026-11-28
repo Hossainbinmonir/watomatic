@@ -40,4 +40,7 @@ interface RuleExecutionLogDao {
 
     @Query("DELETE FROM rule_execution_logs WHERE replied_at < :cutoffTime")
     fun purgeOldLogs(cutoffTime: Long)
+
+    @Query("DELETE FROM rule_execution_logs WHERE replied_at <= :cutoffTime")
+    fun purgeOldLogsSync(cutoffTime: Long): Int
 }

@@ -33,8 +33,10 @@ import com.parishod.watomatic.model.ai.AiMemoryDatabase;
 import com.parishod.watomatic.model.ai.AiMemoryRepository;
 import com.parishod.watomatic.model.ai.AiNote;
 import com.parishod.watomatic.model.ai.PendingPostDispatchMemoryStore;
+import com.parishod.watomatic.model.logs.AttemptClaimPersistOutcome;
 import com.parishod.watomatic.model.logs.ClaimAcquireOutcome;
 import com.parishod.watomatic.model.logs.NotificationDispatchClaimEntity;
+import com.parishod.watomatic.model.logs.ReplyAttemptEntity;
 import com.parishod.watomatic.model.rules.AutoReplyRulesDatabase;
 import com.parishod.watomatic.network.OpenAIService;
 import com.parishod.watomatic.network.RetrofitInstance;
@@ -54,6 +56,7 @@ import com.parishod.watomatic.service.ai.ParsedAiResponse;
 import com.parishod.watomatic.service.reply.NotificationEventKeyBuilder;
 import com.parishod.watomatic.service.reply.NotificationReplyRecoveryManager;
 import com.parishod.watomatic.service.reply.PendingClaimHandoff;
+import com.parishod.watomatic.service.reply.PreDispatchRetryCoordinator;
 import com.parishod.watomatic.service.reply.ReplyAttempt;
 import com.parishod.watomatic.service.reply.ReplyExecutionManager;
 import com.parishod.watomatic.service.reply.ReplyExecutionResult;
@@ -63,16 +66,20 @@ import com.parishod.watomatic.service.reply.ReplySourceType;
 import com.parishod.watomatic.service.reply.RetryDecision;
 import com.parishod.watomatic.service.rules.RoomRuleExecutionLogStore;
 import com.parishod.watomatic.service.rules.RuleEvaluator;
+import com.parishod.watomatic.service.rules.RuleExecutionReservationCoordinator;
 import com.parishod.watomatic.service.rules.RuleNotificationProcessor;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import retrofit2.Call;
@@ -89,14 +96,26 @@ public class NotificationService extends NotificationListenerService {
     private ExecutorService aiMemoryExecutor;
     private ExecutorService postDispatchPersistenceExecutor;
     private ExecutorService lastPostDispatchPersistenceExecutor;
+    private volatile boolean postDispatchExecutorOverriddenForTesting = false;
     private volatile ReplyExecutionManager replyExecutionManager;
 
     private final AtomicBoolean serviceDestroyed = new AtomicBoolean(false);
-    private final AtomicBoolean startupRecoverySucceeded = new AtomicBoolean(false);
-    private volatile long lastClaimPurgeAtMs = 0L;
+    private boolean startupRecoveryInFlight = false;
+    private boolean startupRecoveryCompletedOk = false;
+    private CompletableFuture<Boolean> startupRecoveryFuture = null;
+    private volatile long startupRecoveryWaitTimeoutMs = 5_000L;
+    @Nullable
+    private volatile Runnable startupReplayTestHook = null;
+    private final AtomicBoolean retentionCleanupInFlight = new AtomicBoolean(false);
     private final Object lifecycleLock = new Object();
     // Maps active async AI claimToken -> eventKey so service shutdown cancels interrupted claims cleanly
     private final ConcurrentHashMap<String, String> pendingAsyncClaims = new ConcurrentHashMap<>();
+    private final Set<Call<?>> activeAiCalls = ConcurrentHashMap.newKeySet();
+    private volatile PreDispatchRetryCoordinator preDispatchRetryCoordinator;
+    private final ConcurrentHashMap<String, RuleExecutionReservationCoordinator.RuleReservation> pendingRuleReservationsByClaimToken =
+            new ConcurrentHashMap<>();
+    private final RuleExecutionReservationCoordinator ruleReservationCoordinator =
+            new RuleExecutionReservationCoordinator();
     private final AiConversationCoordinator aiConversationCoordinator = new AiConversationCoordinator();
 
     @Override
@@ -106,21 +125,148 @@ public class NotificationService extends NotificationListenerService {
     }
 
     private void ensureStartupRecovery() {
-        if (!startupRecoverySucceeded.get() && !serviceDestroyed.get()) {
-            if (NotificationReplyRecoveryManager.tryRecoverOnStartup(getApplicationContext())) {
-                startupRecoverySucceeded.set(true);
-                executePostDispatchPersistence(() -> {
-                    try {
-                        PendingPostDispatchMemoryStore.replayPendingEntries(
-                                getApplicationContext(),
-                                getAiMemoryRepository(),
-                                getDbUtils()
-                        );
-                    } catch (Exception e) {
-                        Log.w(TAG, "Failed replaying staged AI memory writes (" + e.getClass().getSimpleName() + ")");
-                    }
-                });
+        final CompletableFuture<Boolean> gateFuture;
+        synchronized (lifecycleLock) {
+            if (serviceDestroyed.get() || startupRecoveryCompletedOk || startupRecoveryInFlight) {
+                return;
             }
+            startupRecoveryInFlight = true;
+            gateFuture = new CompletableFuture<>();
+            startupRecoveryFuture = gateFuture;
+        }
+
+        boolean dbRecoveryOk = false;
+        try {
+            dbRecoveryOk = NotificationReplyRecoveryManager.tryRecoverOnStartup(getApplicationContext());
+        } catch (Exception e) {
+            Log.w(TAG, "Startup DB recovery failed (" + e.getClass().getSimpleName() + ")");
+            dbRecoveryOk = false;
+        }
+
+        if (!dbRecoveryOk) {
+            synchronized (lifecycleLock) {
+                startupRecoveryInFlight = false;
+                startupRecoveryCompletedOk = false;
+                if (startupRecoveryFuture == gateFuture) {
+                    gateFuture.complete(false);
+                } else {
+                    gateFuture.complete(false);
+                }
+            }
+            return;
+        }
+
+        try {
+            executePostDispatchPersistence(() -> {
+                boolean allOk = false;
+                try {
+                    if (serviceDestroyed.get()) {
+                        return;
+                    }
+                    Runnable testHook = startupReplayTestHook;
+                    if (testHook != null) {
+                        testHook.run();
+                    }
+                    if (serviceDestroyed.get()) {
+                        return;
+                    }
+                    PendingPostDispatchMemoryStore.ReplayReport report =
+                            PendingPostDispatchMemoryStore.replayPendingEntriesWithReport(
+                                    getApplicationContext(),
+                                    getAiMemoryRepository(),
+                                    getDbUtils()
+                            );
+                    allOk = report.getAllSucceeded();
+                    if (!allOk) {
+                        Log.w(TAG, "Startup AI memory replay had failures: failedCount=" + report.getFailedCount());
+                    }
+                    if (!serviceDestroyed.get()) {
+                        try {
+                            getDbUtils().runPeriodicRetentionCleanupIfDue(System.currentTimeMillis());
+                        } catch (Exception cleanupEx) {
+                            Log.w(TAG, "Startup retention cleanup failed (" + cleanupEx.getClass().getSimpleName() + ")");
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed replaying staged AI memory writes (" + e.getClass().getSimpleName() + ")");
+                    allOk = false;
+                } finally {
+                    boolean effectiveOk = allOk && !serviceDestroyed.get();
+                    synchronized (lifecycleLock) {
+                        startupRecoveryInFlight = false;
+                        startupRecoveryCompletedOk = effectiveOk;
+                        gateFuture.complete(effectiveOk);
+                    }
+                }
+            });
+        } catch (Exception scheduleEx) {
+            Log.w(TAG, "Failed scheduling startup AI memory replay (" + scheduleEx.getClass().getSimpleName() + ")");
+            synchronized (lifecycleLock) {
+                startupRecoveryInFlight = false;
+                startupRecoveryCompletedOk = false;
+                gateFuture.complete(false);
+            }
+        }
+    }
+
+    private boolean awaitStartupRecoveryForAi() {
+        CompletableFuture<Boolean> gate;
+        synchronized (lifecycleLock) {
+            if (serviceDestroyed.get()) {
+                return false;
+            }
+            if (startupRecoveryCompletedOk) {
+                return true;
+            }
+            gate = startupRecoveryFuture;
+        }
+        if (gate == null) {
+            ensureStartupRecovery();
+            synchronized (lifecycleLock) {
+                if (serviceDestroyed.get()) {
+                    return false;
+                }
+                if (startupRecoveryCompletedOk) {
+                    return true;
+                }
+                gate = startupRecoveryFuture;
+            }
+            if (gate == null) {
+                return false;
+            }
+        }
+        try {
+            Boolean result = gate.get(Math.max(1L, startupRecoveryWaitTimeoutMs), TimeUnit.MILLISECONDS);
+            return Boolean.TRUE.equals(result) && !serviceDestroyed.get();
+        } catch (TimeoutException timeoutEx) {
+            Log.w(TAG, "Timed out waiting for startup AI recovery to complete.");
+            return false;
+        } catch (InterruptedException interruptedEx) {
+            Thread.currentThread().interrupt();
+            Log.w(TAG, "Interrupted while waiting for startup AI recovery.");
+            return false;
+        } catch (Exception e) {
+            Log.w(TAG, "Startup AI recovery wait failed (" + e.getClass().getSimpleName() + ")");
+            return false;
+        }
+    }
+
+    @VisibleForTesting
+    void setStartupRecoveryWaitTimeoutMsForTesting(long timeoutMs) {
+        this.startupRecoveryWaitTimeoutMs = timeoutMs;
+    }
+
+    @VisibleForTesting
+    void setStartupReplayTestHookForTesting(@Nullable Runnable hook) {
+        this.startupReplayTestHook = hook;
+    }
+
+    @VisibleForTesting
+    void setPostDispatchPersistenceExecutorForTesting(@Nullable ExecutorService executor) {
+        synchronized (lifecycleLock) {
+            this.postDispatchPersistenceExecutor = executor;
+            this.lastPostDispatchPersistenceExecutor = executor;
+            this.postDispatchExecutorOverriddenForTesting = (executor != null);
         }
     }
 
@@ -165,14 +311,20 @@ public class NotificationService extends NotificationListenerService {
         }
         if (postExec != null) {
             if (!postExec.isShutdown()) {
-                postExec.submit(() -> { }).get(5, TimeUnit.SECONDS);
+                try {
+                    postExec.submit(() -> { }).get(5, TimeUnit.SECONDS);
+                } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                }
             } else {
                 postExec.awaitTermination(5, TimeUnit.SECONDS);
             }
         }
         if (lastPostExec != null && lastPostExec != postExec) {
             if (!lastPostExec.isShutdown()) {
-                lastPostExec.submit(() -> { }).get(5, TimeUnit.SECONDS);
+                try {
+                    lastPostExec.submit(() -> { }).get(5, TimeUnit.SECONDS);
+                } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                }
             } else {
                 lastPostExec.awaitTermination(5, TimeUnit.SECONDS);
             }
@@ -223,16 +375,21 @@ public class NotificationService extends NotificationListenerService {
     private void executePostDispatchPersistence(@NonNull Runnable task) {
         ExecutorService exec;
         boolean drainImmediately;
+        boolean overridden;
         synchronized (lifecycleLock) {
             drainImmediately = serviceDestroyed.get();
-            if (postDispatchPersistenceExecutor == null || postDispatchPersistenceExecutor.isShutdown()) {
+            overridden = postDispatchExecutorOverriddenForTesting;
+            if (!overridden && (postDispatchPersistenceExecutor == null || postDispatchPersistenceExecutor.isShutdown())) {
                 postDispatchPersistenceExecutor = Executors.newSingleThreadExecutor();
             }
             exec = postDispatchPersistenceExecutor;
             lastPostDispatchPersistenceExecutor = exec;
         }
+        if (exec == null) {
+            throw new java.util.concurrent.RejectedExecutionException("Post-dispatch executor is unavailable");
+        }
         exec.execute(task);
-        if (drainImmediately) {
+        if (drainImmediately && !overridden) {
             synchronized (lifecycleLock) {
                 if (postDispatchPersistenceExecutor == exec) {
                     exec.shutdown();
@@ -252,6 +409,28 @@ public class NotificationService extends NotificationListenerService {
         return replyDecider;
     }
 
+    private PreDispatchRetryCoordinator getPreDispatchRetryCoordinator() {
+        PreDispatchRetryCoordinator current = preDispatchRetryCoordinator;
+        if (current == null) {
+            synchronized (lifecycleLock) {
+                current = preDispatchRetryCoordinator;
+                if (current == null) {
+                    current = new PreDispatchRetryCoordinator(getApplicationContext());
+                    preDispatchRetryCoordinator = current;
+                }
+            }
+        }
+        return current;
+    }
+
+    @VisibleForTesting
+    void setPreDispatchRetryCoordinatorForTesting(@Nullable PreDispatchRetryCoordinator coordinator) {
+        synchronized (lifecycleLock) {
+            this.preDispatchRetryCoordinator = coordinator;
+            this.ruleNotificationProcessor = null;
+        }
+    }
+
     private RuleNotificationProcessor getRuleNotificationProcessor() {
         synchronized (lifecycleLock) {
             if (serviceDestroyed.get()) {
@@ -261,11 +440,61 @@ public class NotificationService extends NotificationListenerService {
                 ruleNotificationProcessor = new RuleNotificationProcessor(
                         getApplicationContext(),
                         Executors.newSingleThreadScheduledExecutor(),
-                        getDbUtils()
+                        getDbUtils(),
+                        ruleReservationCoordinator,
+                        getPreDispatchRetryCoordinator()
                 );
             }
             return ruleNotificationProcessor;
         }
+    }
+
+    @VisibleForTesting
+    void awaitRuleProcessorIdleForTesting() {
+        RuleNotificationProcessor processor;
+        synchronized (lifecycleLock) {
+            processor = ruleNotificationProcessor;
+        }
+        if (processor != null) {
+            processor.awaitIdleForTesting();
+        }
+    }
+
+    private void scheduleRetentionCleanupIfDue() {
+        if (serviceDestroyed.get()) {
+            return;
+        }
+        long nowMs = System.currentTimeMillis();
+        try {
+            if (!getDbUtils().isRetentionCleanupDue(nowMs)) {
+                return;
+            }
+        } catch (Exception ignored) {
+            return;
+        }
+        if (!retentionCleanupInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            executePostDispatchPersistence(() -> {
+                try {
+                    if (!serviceDestroyed.get()) {
+                        getDbUtils().runPeriodicRetentionCleanupIfDue(System.currentTimeMillis());
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Periodic retention cleanup failed (" + e.getClass().getSimpleName() + ")");
+                } finally {
+                    retentionCleanupInFlight.set(false);
+                }
+            });
+        } catch (Exception scheduleEx) {
+            retentionCleanupInFlight.set(false);
+        }
+    }
+
+    @VisibleForTesting
+    RuleExecutionReservationCoordinator getRuleReservationCoordinatorForTesting() {
+        return ruleReservationCoordinator;
     }
 
     @Nullable
@@ -291,8 +520,21 @@ public class NotificationService extends NotificationListenerService {
         }
     }
 
+    private void releasePendingRuleReservationByClaimToken(@Nullable String claimToken) {
+        if (claimToken == null || claimToken.isEmpty()) {
+            return;
+        }
+        RuleExecutionReservationCoordinator.RuleReservation reservation =
+                pendingRuleReservationsByClaimToken.remove(claimToken);
+        if (reservation != null) {
+            ruleReservationCoordinator.release(reservation.getReservationId());
+        }
+    }
+
     private void releaseUnusedClaimSafely(@Nullable String eventKey, @Nullable String claimToken) {
         untrackAsyncClaim(claimToken);
+        PendingClaimHandoff.cancel(eventKey, claimToken);
+        releasePendingRuleReservationByClaimToken(claimToken);
         if (eventKey == null || eventKey.isEmpty() || claimToken == null || claimToken.isEmpty()) {
             return;
         }
@@ -309,6 +551,8 @@ public class NotificationService extends NotificationListenerService {
             @NonNull String failureCategory
     ) {
         untrackAsyncClaim(claimToken);
+        PendingClaimHandoff.cancel(eventKey, claimToken);
+        releasePendingRuleReservationByClaimToken(claimToken);
         if (eventKey == null || eventKey.isEmpty() || claimToken == null || claimToken.isEmpty()) {
             return;
         }
@@ -331,28 +575,42 @@ public class NotificationService extends NotificationListenerService {
             return;
         }
         ensureStartupRecovery();
+        scheduleRetentionCleanupIfDue();
         RuleNotificationProcessor processor = getRuleNotificationProcessor();
         if (processor == null) {
             return;
         }
-        processor.processNotification(sbn, new RuleNotificationProcessor.ReplyDispatchCallback() {
+        processor.processNotification(sbn, new RuleNotificationProcessor.ClaimAwareReplyDispatchCallback() {
             @Override
             public void onRuleMatchedSendReply(
                     @NonNull StatusBarNotification statusBarNotification,
                     @NonNull NotificationWear notificationWear,
                     @NonNull String replyText,
-                    @NonNull AutoReplyRule matchedRule
+                    @NonNull AutoReplyRule matchedRule,
+                    @Nullable String explicitClaimToken,
+                    @Nullable String explicitEventKey,
+                    @Nullable RuleExecutionReservationCoordinator.RuleReservation reservation
             ) {
-                String eventKey = buildClaimEventKey(statusBarNotification);
-                String claimToken = eventKey != null ? PendingClaimHandoff.consume(eventKey) : null;
+                String eventKey = explicitEventKey != null
+                        ? explicitEventKey
+                        : buildClaimEventKey(statusBarNotification);
+                String claimToken = explicitClaimToken != null
+                        ? explicitClaimToken
+                        : (eventKey != null ? PendingClaimHandoff.consume(eventKey) : null);
+                if (claimToken != null && reservation != null) {
+                    pendingRuleReservationsByClaimToken.put(claimToken, reservation);
+                }
                 if (serviceDestroyed.get()) {
                     Log.d(TAG, "Ignoring rule dispatch after NotificationService destruction.");
+                    if (reservation != null) {
+                        ruleReservationCoordinator.release(reservation.getReservationId());
+                    }
                     cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                     return;
                 }
                 if (matchedRule.getUseAiReply()) {
                     Log.d(TAG, "Rule matched with AI enabled (" + matchedRule.getName() + "), dispatching AI reply.");
-                    dispatchRuleAiReply(statusBarNotification, notificationWear, matchedRule, claimToken);
+                    dispatchRuleAiReply(statusBarNotification, notificationWear, matchedRule, claimToken, reservation);
                 } else {
                     Log.d(TAG, "Rule matched (" + matchedRule.getName() + "), dispatching reply.");
                     sendActualReply(
@@ -362,15 +620,24 @@ public class NotificationService extends NotificationListenerService {
                             matchedRule.getName(),
                             ReplySourceType.RULE_STATIC,
                             matchedRule,
-                            claimToken
+                            claimToken,
+                            reservation
                     );
                 }
             }
 
             @Override
-            public void onFallbackToLegacy(@NonNull StatusBarNotification statusBarNotification) {
-                String eventKey = buildClaimEventKey(statusBarNotification);
-                String claimToken = eventKey != null ? PendingClaimHandoff.consume(eventKey) : null;
+            public void onFallbackToLegacy(
+                    @NonNull StatusBarNotification statusBarNotification,
+                    @Nullable String explicitClaimToken,
+                    @Nullable String explicitEventKey
+            ) {
+                String eventKey = explicitEventKey != null
+                        ? explicitEventKey
+                        : buildClaimEventKey(statusBarNotification);
+                String claimToken = explicitClaimToken != null
+                        ? explicitClaimToken
+                        : (eventKey != null ? PendingClaimHandoff.consume(eventKey) : null);
                 if (serviceDestroyed.get()) {
                     Log.d(TAG, "Ignoring legacy fallback after NotificationService destruction.");
                     cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
@@ -481,6 +748,28 @@ public class NotificationService extends NotificationListenerService {
             @Nullable AutoReplyRule matchedRule,
             @Nullable String preClaimedToken
     ) {
+        return sendActualReply(
+                sbn,
+                notificationWear,
+                replyText,
+                ruleOrSourceName,
+                sourceType,
+                matchedRule,
+                preClaimedToken,
+                null
+        );
+    }
+
+    ReplyExecutionResult sendActualReply(
+            StatusBarNotification sbn,
+            NotificationWear notificationWear,
+            String replyText,
+            String ruleOrSourceName,
+            ReplySourceType sourceType,
+            @Nullable AutoReplyRule matchedRule,
+            @Nullable String preClaimedToken,
+            @Nullable RuleExecutionReservationCoordinator.RuleReservation explicitRuleReservation
+    ) {
         String packageName = (sbn != null && sbn.getPackageName() != null) ? sbn.getPackageName() : "";
         String notificationKey = (sbn != null) ? sbn.getKey() : null;
         ReplySourceType resolvedSourceType = sourceType != null ? sourceType : ReplySourceType.DEFAULT;
@@ -505,14 +794,23 @@ public class NotificationService extends NotificationListenerService {
         String effectiveClaimToken = preClaimedToken;
         if (effectiveClaimToken == null && eventKey != null) {
             effectiveClaimToken = PendingClaimHandoff.consume(eventKey);
+        } else if (eventKey != null && effectiveClaimToken != null) {
+            PendingClaimHandoff.complete(eventKey, effectiveClaimToken);
         }
         if (effectiveClaimToken != null) {
             untrackAsyncClaim(effectiveClaimToken);
         }
+        RuleExecutionReservationCoordinator.RuleReservation trackedReservation =
+                (effectiveClaimToken != null) ? pendingRuleReservationsByClaimToken.remove(effectiveClaimToken) : null;
+        final RuleExecutionReservationCoordinator.RuleReservation activeReservation =
+                explicitRuleReservation != null ? explicitRuleReservation : trackedReservation;
 
         ReplyExecutionManager manager = getReplyExecutionManager();
         if (serviceDestroyed.get() || manager == null) {
             Log.w(TAG, "Reply dispatch cancelled: NotificationService destroyed.");
+            if (activeReservation != null) {
+                ruleReservationCoordinator.release(activeReservation.getReservationId());
+            }
             if (effectiveClaimToken != null && eventKey != null) {
                 cancelPendingClaimSafely(eventKey, effectiveClaimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
             }
@@ -529,6 +827,9 @@ public class NotificationService extends NotificationListenerService {
 
         if (sbn == null || eventKey == null) {
             Log.w(TAG, "Reply dispatch rejected: missing notification metadata for persistent claim protection.");
+            if (activeReservation != null) {
+                ruleReservationCoordinator.release(activeReservation.getReservationId());
+            }
             if (effectiveClaimToken != null && eventKey != null) {
                 cancelPendingClaimSafely(eventKey, effectiveClaimToken, ReplyExecutionManager.FAILURE_MISSING_WEAR_DATA);
             }
@@ -561,6 +862,9 @@ public class NotificationService extends NotificationListenerService {
                         String denialCategory = ReplyRetryPolicy.failureCategoryForDenial(outcome.getDecision());
                         Log.i(TAG, "Suppressed reply dispatch by persistent claim: decision="
                                 + outcome.getDecision() + ", category=" + denialCategory);
+                        if (activeReservation != null) {
+                            ruleReservationCoordinator.release(activeReservation.getReservationId());
+                        }
                         return new ReplyExecutionResult(
                                 effectiveAttemptId,
                                 ReplyExecutionStatus.CANCELLED,
@@ -573,6 +877,9 @@ public class NotificationService extends NotificationListenerService {
                     }
                 } catch (Exception e) {
                     Log.e(TAG, "Failed acquiring persistent claim before dispatch (" + e.getClass().getSimpleName() + ")");
+                    if (activeReservation != null) {
+                        ruleReservationCoordinator.release(activeReservation.getReservationId());
+                    }
                     return new ReplyExecutionResult(
                             effectiveAttemptId,
                             ReplyExecutionStatus.FAILED,
@@ -603,6 +910,9 @@ public class NotificationService extends NotificationListenerService {
                             String denialCategory = ReplyRetryPolicy.failureCategoryForDenial(decision);
                             Log.i(TAG, "Pre-claimed token blocked at dispatch gate: decision="
                                     + decision + ", category=" + denialCategory);
+                            if (activeReservation != null) {
+                                ruleReservationCoordinator.release(activeReservation.getReservationId());
+                            }
                             return new ReplyExecutionResult(
                                     effectiveAttemptId,
                                     ReplyExecutionStatus.CANCELLED,
@@ -610,6 +920,28 @@ public class NotificationService extends NotificationListenerService {
                                     false,
                                     denialCategory,
                                     "Pre-claimed token not eligible for dispatch: " + decision,
+                                    System.currentTimeMillis()
+                            );
+                        }
+                        RetryDecision attemptBlocker = db.getBlockingAttemptDecisionForEvent(eventKey);
+                        if (attemptBlocker != null) {
+                            String denialCategory = ReplyRetryPolicy.failureCategoryForDenial(attemptBlocker);
+                            Log.i(TAG, "Pre-claimed token blocked by reply_attempts evidence: decision="
+                                    + attemptBlocker + ", category=" + denialCategory);
+                            try {
+                                db.releaseUnusedNotificationClaim(eventKey, effectiveAttemptId);
+                            } catch (Exception ignored) {
+                            }
+                            if (activeReservation != null) {
+                                ruleReservationCoordinator.release(activeReservation.getReservationId());
+                            }
+                            return new ReplyExecutionResult(
+                                    effectiveAttemptId,
+                                    ReplyExecutionStatus.CANCELLED,
+                                    false,
+                                    false,
+                                    denialCategory,
+                                    "Pre-claimed token blocked by reply_attempts: " + attemptBlocker,
                                     System.currentTimeMillis()
                             );
                         }
@@ -628,6 +960,9 @@ public class NotificationService extends NotificationListenerService {
                             String denialCategory = ReplyRetryPolicy.failureCategoryForDenial(outcome.getDecision());
                             Log.i(TAG, "Missing pre-claimed row blocked at dispatch gate: decision="
                                     + outcome.getDecision() + ", category=" + denialCategory);
+                            if (activeReservation != null) {
+                                ruleReservationCoordinator.release(activeReservation.getReservationId());
+                            }
                             return new ReplyExecutionResult(
                                     effectiveAttemptId,
                                     ReplyExecutionStatus.CANCELLED,
@@ -641,6 +976,9 @@ public class NotificationService extends NotificationListenerService {
                     }
                 } catch (Exception e) {
                     Log.e(TAG, "Failed verifying persistent claim before dispatch (" + e.getClass().getSimpleName() + ")");
+                    if (activeReservation != null) {
+                        ruleReservationCoordinator.release(activeReservation.getReservationId());
+                    }
                     return new ReplyExecutionResult(
                             effectiveAttemptId,
                             ReplyExecutionStatus.FAILED,
@@ -710,7 +1048,7 @@ public class NotificationService extends NotificationListenerService {
             boolean dispatchAttempted = inMemoryDispatchAttempted.get();
             if (!dispatchAttempted) {
                 try {
-                    com.parishod.watomatic.model.logs.ReplyAttemptEntity persistedAttempt = db.getAttemptById(attempt.getAttemptId());
+                    ReplyAttemptEntity persistedAttempt = db.getAttemptById(attempt.getAttemptId());
                     if (persistedAttempt != null && persistedAttempt.getDispatchAttempted()) {
                         dispatchAttempted = true;
                     }
@@ -743,24 +1081,55 @@ public class NotificationService extends NotificationListenerService {
             );
         }
 
+        AttemptClaimPersistOutcome persistOutcome;
         try {
-            db.recordAttemptAndClaimResult(eventKey, attempt, result, senderName, incomingMsg, sbn);
+            persistOutcome = db.recordAttemptAndClaimResult(eventKey, attempt, result, senderName, incomingMsg, sbn);
         } catch (Exception e) {
             Log.e(TAG, "Failed persisting reply execution and claim result (" + e.getClass().getSimpleName() + ")");
-            persistOutcomeFallback(db, eventKey, attempt, result, senderName, incomingMsg, sbn);
+            persistOutcome = persistOutcomeFallback(db, eventKey, attempt, result, senderName, incomingMsg, sbn);
+        }
+        getPreDispatchRetryCoordinator().onTerminalOutcome(eventKey, persistOutcome.getEffectiveAttemptStatus());
+
+        if (result.isDispatched() && !persistOutcome.getDispatchedPersisted()) {
+            Log.w(TAG, "Reply dispatched via PendingIntent but authoritative DISPATCHED persistence did not complete: attemptStatus="
+                    + persistOutcome.getEffectiveAttemptStatus()
+                    + ", claimStatus=" + persistOutcome.getEffectiveClaimStatus());
+        }
+
+        if (activeReservation != null) {
+            if (result.isDispatched()) {
+                if (persistOutcome.getDispatchedPersisted()) {
+                    ruleReservationCoordinator.confirmDispatched(
+                            activeReservation.getReservationId(),
+                            result.getTimestampMs()
+                    );
+                } else {
+                    // Dispatch occurred physically, but persistence was inconsistent/refused; lock conservatively.
+                    ruleReservationCoordinator.markUnknown(
+                            activeReservation.getReservationId(),
+                            result.getTimestampMs()
+                    );
+                }
+            } else if (result.isUnknown() || persistOutcome.getEffectiveAttemptStatus() == ReplyExecutionStatus.UNKNOWN) {
+                ruleReservationCoordinator.markUnknown(
+                        activeReservation.getReservationId(),
+                        result.getTimestampMs()
+                );
+            } else {
+                ruleReservationCoordinator.release(activeReservation.getReservationId());
+            }
         }
 
         if (result.isDispatched()) {
-            if (matchedRule != null) {
+            if (matchedRule != null && persistOutcome.getDispatchedPersisted()) {
                 final long ruleId = matchedRule.getId();
                 final long arrivedTime = (sbn != null && sbn.getNotification() != null)
                         ? sbn.getNotification().when
                         : attempt.getCreatedAtMs();
-                final String ruleSenderName = (senderName != null && !senderName.trim().isEmpty())
-                        ? senderName.trim()
-                        : RuleEvaluator.UNKNOWN_SENDER;
+                final String ruleSenderName = RuleEvaluator.buildSenderScopeKey(senderName, isGroupConv);
                 final String safeNotifKey = notificationKey != null ? notificationKey : "";
                 final long repliedAt = result.getTimestampMs();
+                final String reservationId = activeReservation != null ? activeReservation.getReservationId() : null;
                 Runnable recordRuleLogTask = () -> {
                     try {
                         new RoomRuleExecutionLogStore(
@@ -773,18 +1142,18 @@ public class NotificationService extends NotificationListenerService {
                                 arrivedTime,
                                 repliedAt
                         );
+                        if (reservationId != null) {
+                            ruleReservationCoordinator.markPersistedToDb(reservationId);
+                        }
                     } catch (Exception e) {
                         Log.e(TAG, "Failed recording rule execution log (" + e.getClass().getSimpleName() + ")");
                     }
                 };
                 if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-                    ExecutorService exec = getAiMemoryExecutor();
-                    if (exec != null) {
-                        try {
-                            exec.execute(recordRuleLogTask);
-                        } catch (Exception e) {
-                            Log.e(TAG, "Failed scheduling rule execution log (" + e.getClass().getSimpleName() + ")");
-                        }
+                    try {
+                        executePostDispatchPersistence(recordRuleLogTask);
+                    } catch (Exception e) {
+                        Log.e(TAG, "Failed scheduling rule execution log (" + e.getClass().getSimpleName() + ")");
                     }
                 } else {
                     recordRuleLogTask.run();
@@ -803,23 +1172,7 @@ public class NotificationService extends NotificationListenerService {
                     Log.w(TAG, "Unable to cancel notification (" + e.getClass().getSimpleName() + ")");
                 }
             }
-            if (!serviceDestroyed.get() && canPurgeMessages()) {
-                try {
-                    db.purgeMessageLogs();
-                    PreferencesManager.getPreferencesInstance(this).setPurgeMessageTime(System.currentTimeMillis());
-                } catch (Exception e) {
-                    Log.w(TAG, "Unable to purge old message logs (" + e.getClass().getSimpleName() + ")");
-                }
-            }
-            long nowMs = System.currentTimeMillis();
-            if (!serviceDestroyed.get() && (nowMs - lastClaimPurgeAtMs) >= 24L * 60L * 60L * 1000L) {
-                try {
-                    db.purgeExpiredNotificationClaims(nowMs);
-                    lastClaimPurgeAtMs = nowMs;
-                } catch (Exception e) {
-                    Log.w(TAG, "Unable to purge expired notification claims (" + e.getClass().getSimpleName() + ")");
-                }
-            }
+            scheduleRetentionCleanupIfDue();
         } else {
             Log.w(TAG, "Reply dispatch not completed: status=" + result.getStatus()
                     + ", category=" + result.getFailureCategory());
@@ -827,7 +1180,82 @@ public class NotificationService extends NotificationListenerService {
         return result;
     }
 
-    private void persistOutcomeFallback(
+    /**
+     * Explicit, bounded retry entrypoint for pre-dispatch failures (`FAILED` with `dispatch_attempted == 0`).
+     * Requires live service, fresh notification, and valid `PendingIntent` + free-form `RemoteInput`.
+     */
+    @VisibleForTesting
+    @NonNull
+    ReplyExecutionResult retryPreDispatchFailure(
+            @Nullable StatusBarNotification sbn,
+            @Nullable NotificationWear notificationWear,
+            @Nullable String replyText,
+            @Nullable String ruleOrSourceName,
+            @Nullable ReplySourceType sourceType,
+            @Nullable AutoReplyRule matchedRule
+    ) {
+        String eventKey = NotificationEventKeyBuilder.buildEventKey(sbn, extractIncomingMessage(sbn));
+        String packageName = (sbn != null && sbn.getPackageName() != null) ? sbn.getPackageName() : "";
+        String senderName = sbn != null ? NotificationUtils.getTitle(sbn) : null;
+        String senderKey = NotificationEventKeyBuilder.normalizeSenderKey(senderName, isGroupNotification(sbn));
+        String newClaimToken = UUID.randomUUID().toString();
+        ClaimAcquireOutcome retryOutcome;
+        try {
+            retryOutcome = getPreDispatchRetryCoordinator().tryAcquireExplicitPreDispatchRetry(
+                    getDbUtils(),
+                    sbn,
+                    notificationWear,
+                    eventKey,
+                    newClaimToken,
+                    packageName,
+                    senderKey,
+                    sbn != null ? sbn.getKey() : null,
+                    System.currentTimeMillis(),
+                    serviceDestroyed.get()
+            );
+        } catch (Exception e) {
+            Log.e(TAG, "Failed evaluating pre-dispatch retry (" + e.getClass().getSimpleName() + ")");
+            return new ReplyExecutionResult(
+                    newClaimToken,
+                    ReplyExecutionStatus.FAILED,
+                    false,
+                    false,
+                    ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR,
+                    "Pre-dispatch retry acquisition failed",
+                    System.currentTimeMillis()
+            );
+        }
+
+        if (!retryOutcome.getAcquired()) {
+            RetryDecision decision = retryOutcome.getDecision();
+            ReplyExecutionStatus deniedStatus = (decision == RetryDecision.DENY_MISSING_CAPABILITY)
+                    ? ReplyExecutionStatus.FAILED
+                    : ReplyExecutionStatus.CANCELLED;
+            return new ReplyExecutionResult(
+                    newClaimToken,
+                    deniedStatus,
+                    false,
+                    false,
+                    ReplyRetryPolicy.failureCategoryForDenial(decision),
+                    "Pre-dispatch retry denied: " + decision,
+                    System.currentTimeMillis()
+            );
+        }
+
+        return sendActualReply(
+                sbn,
+                notificationWear,
+                replyText,
+                ruleOrSourceName,
+                sourceType != null ? sourceType : ReplySourceType.DEFAULT,
+                matchedRule,
+                newClaimToken,
+                null
+        );
+    }
+
+    @NonNull
+    private AttemptClaimPersistOutcome persistOutcomeFallback(
             @NonNull DbUtils db,
             @Nullable String eventKey,
             @NonNull ReplyAttempt attempt,
@@ -869,23 +1297,68 @@ public class NotificationService extends NotificationListenerService {
             } catch (Exception fallbackAttemptEx) {
                 Log.e(TAG, "Failed persisting conservative attempt outcome (" + fallbackAttemptEx.getClass().getSimpleName() + ")");
             }
+            boolean claimUpdated = false;
             if (eventKey != null) {
                 try {
-                    db.updateNotificationClaimResult(eventKey, attempt.getAttemptId(), conservativeResult);
+                    claimUpdated = db.updateNotificationClaimResult(eventKey, attempt.getAttemptId(), conservativeResult) > 0;
                 } catch (Exception claimEx) {
                     Log.e(TAG, "Failed persisting conservative notification claim result (" + claimEx.getClass().getSimpleName() + ")");
                 }
             }
-            return;
+            NotificationDispatchClaimEntity finalClaim = null;
+            if (eventKey != null) {
+                try {
+                    finalClaim = db.getNotificationClaim(eventKey);
+                } catch (Exception ignored) {
+                }
+            }
+            return new AttemptClaimPersistOutcome(
+                    ReplyExecutionStatus.UNKNOWN,
+                    finalClaim != null ? finalClaim.getClaimStatus() : null,
+                    false,
+                    claimUpdated,
+                    eventKey != null && finalClaim == null,
+                    true,
+                    ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR
+            );
         }
 
+        boolean claimUpdated = false;
         if (eventKey != null) {
             try {
-                db.updateNotificationClaimResult(eventKey, attempt.getAttemptId(), result);
+                claimUpdated = db.updateNotificationClaimResult(eventKey, attempt.getAttemptId(), result) > 0;
             } catch (Exception claimEx) {
                 Log.e(TAG, "Failed persisting fallback notification claim result (" + claimEx.getClass().getSimpleName() + ")");
             }
         }
+        NotificationDispatchClaimEntity finalClaim = null;
+        if (eventKey != null) {
+            try {
+                finalClaim = db.getNotificationClaim(eventKey);
+            } catch (Exception ignored) {
+            }
+        }
+        ReplyExecutionStatus effectiveStatus = result.getStatus();
+        try {
+            ReplyAttemptEntity persisted = db.getAttemptById(attempt.getAttemptId());
+            if (persisted != null) {
+                effectiveStatus = ReplyExecutionStatus.valueOf(persisted.getStatus());
+            }
+        } catch (Exception ignored) {
+        }
+        boolean finalDispatchedPersisted = effectiveStatus == ReplyExecutionStatus.DISPATCHED
+                && dispatchedConsistentlyPersisted
+                && (eventKey == null || (finalClaim != null
+                        && ReplyExecutionStatus.DISPATCHED.name().equals(finalClaim.getClaimStatus())));
+        return new AttemptClaimPersistOutcome(
+                effectiveStatus,
+                finalClaim != null ? finalClaim.getClaimStatus() : null,
+                finalDispatchedPersisted,
+                claimUpdated,
+                eventKey != null && finalClaim == null,
+                effectiveStatus != result.getStatus(),
+                result.getFailureCategory()
+        );
     }
 
     @Nullable
@@ -910,7 +1383,8 @@ public class NotificationService extends NotificationListenerService {
             @NonNull StatusBarNotification sbn,
             @NonNull NotificationWear notificationWear,
             @NonNull AutoReplyRule matchedRule,
-            @Nullable String claimToken
+            @Nullable String claimToken,
+            @Nullable RuleExecutionReservationCoordinator.RuleReservation reservation
     ) {
         PreferencesManager prefs = PreferencesManager.getPreferencesInstance(this);
         String incomingMessage = extractIncomingMessage(sbn);
@@ -929,7 +1403,8 @@ public class NotificationService extends NotificationListenerService {
                     fallbackSourceLabel,
                     ReplySourceType.AI_FALLBACK,
                     matchedRule,
-                    claimToken
+                    claimToken,
+                    reservation
             );
             return;
         }
@@ -993,29 +1468,47 @@ public class NotificationService extends NotificationListenerService {
 
         boolean shouldUseAI = false;
         if (preferencesManager.isByokRepliesEnabled()) {
-            String apiKey = preferencesManager.getOpenAIApiKey();
-            shouldUseAI = apiKey != null && !apiKey.trim().isEmpty() &&
-                    !apiKey.equals("PENDING_CONFIGURATION") &&
+            String rawApiKey = preferencesManager.getOpenAIApiKey();
+            String trimmedApiKey = rawApiKey != null ? rawApiKey.trim() : null;
+            shouldUseAI = preferencesManager.isSecureStorageAvailable() &&
+                    trimmedApiKey != null && !trimmedApiKey.isEmpty() &&
+                    !"PENDING_CONFIGURATION".equals(trimmedApiKey) &&
                     incomingMessage != null && !incomingMessage.trim().isEmpty();
-            Log.d(TAG, "BYOK mode - API key configured: " + (apiKey != null && !apiKey.trim().isEmpty())
+            Log.d(TAG, "BYOK mode - API key configured: " + (trimmedApiKey != null && !trimmedApiKey.isEmpty())
                     + ", incomingMessage present: " + (incomingMessage != null && !incomingMessage.trim().isEmpty()));
         }
 
         if (shouldUseAI) {
+            boolean isGroupConv = isGroupNotification(sbn);
+            if (AiPromptAndPolicyHelper.shouldAllowAiReply(
+                    0,
+                    0,
+                    preferencesManager.getAiGroupFilterMode(),
+                    isGroupConv,
+                    null,
+                    0,
+                    System.currentTimeMillis()
+            ) == AiPolicyDecision.BLOCKED_GROUP_FILTER) {
+                Log.d(TAG, "BYOK AI request blocked by AI group filter mode before claim acquisition.");
+                releaseUnusedClaimSafely(eventKey, claimToken);
+                return;
+            }
             if (claimToken == null && eventKey != null) {
                 String senderName = sbn != null ? NotificationUtils.getTitle(sbn) : null;
                 String packageName = (sbn != null && sbn.getPackageName() != null) ? sbn.getPackageName() : "";
-                boolean isGroupConv = isGroupNotification(sbn);
                 claimToken = UUID.randomUUID().toString();
                 try {
-                    ClaimAcquireOutcome outcome = getDbUtils().tryAcquireNotificationClaim(
+                    ClaimAcquireOutcome outcome = getPreDispatchRetryCoordinator().tryAcquireForFreshNotification(
+                            getDbUtils(),
+                            sbn,
+                            notificationWear,
                             eventKey,
                             claimToken,
                             packageName,
                             NotificationEventKeyBuilder.normalizeSenderKey(senderName, isGroupConv),
                             sbn != null ? sbn.getKey() : null,
                             System.currentTimeMillis(),
-                            false
+                            serviceDestroyed.get()
                     );
                     if (!outcome.getAcquired()) {
                         Log.i(TAG, "Suppressed async AI request by persistent claim: decision=" + outcome.getDecision());
@@ -1039,6 +1532,14 @@ public class NotificationService extends NotificationListenerService {
                     claimToken
             );
         } else {
+            if (preferencesManager.isByokRepliesEnabled()) {
+                NotificationReplyDecider decider = getReplyDecider();
+                if (!decider.isGroupMessageAndReplyAllowed(sbn) || !decider.canSendReplyNow(sbn)) {
+                    Log.d(TAG, "BYOK fallback to default reply blocked by group restriction or cooldown policy.");
+                    releaseUnusedClaimSafely(eventKey, claimToken);
+                    return;
+                }
+            }
             Log.d(TAG, "AI conditions not met. Using default reply.");
             sendActualReply(sbn, notificationWear, fallbackReplyText, null, ReplySourceType.DEFAULT, null, claimToken);
         }
@@ -1122,6 +1623,7 @@ public class NotificationService extends NotificationListenerService {
                 releasePermit -> {
                     boolean handedOffToFetch = false;
                     try {
+                        boolean recoveryReady = awaitStartupRecoveryForAi();
                         if (serviceDestroyed.get()) {
                             cancelPendingClaimSafely(eventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                             return;
@@ -1130,6 +1632,30 @@ public class NotificationService extends NotificationListenerService {
                         boolean memoryEnabled = prefs.isAiMemoryEnabled() && !unknownSender;
                         boolean notesEnabled = prefs.isAiAutoNotesEnabled();
                         int maxTurnsToKeep = Math.max(20, prefs.getAiMemoryMaxTurns() * 2);
+
+                        if (!recoveryReady) {
+                            Log.w(TAG, "Startup AI recovery unavailable before AI preparation; applying conservative fallback.");
+                            if (enforceGlobalAiPolicy
+                                    && AiPromptAndPolicyHelper.shouldAllowAiReply(
+                                            0, 0, prefs.getAiGroupFilterMode(), isGroup, null, 0, System.currentTimeMillis()
+                                    ) == AiPolicyDecision.BLOCKED_GROUP_FILTER) {
+                                releaseUnusedClaimSafely(eventKey, claimToken);
+                            } else if (enforceGlobalAiPolicy && prefs.isAiSkipWhenLimitReached()) {
+                                releaseUnusedClaimSafely(eventKey, claimToken);
+                            } else {
+                                untrackAsyncClaim(claimToken);
+                                sendActualReply(
+                                        sbn,
+                                        notificationWear,
+                                        fallbackReplyText,
+                                        resolveFallbackSourceLabel(matchedRule, historySourceLabel),
+                                        ReplySourceType.AI_FALLBACK,
+                                        matchedRule,
+                                        claimToken
+                                );
+                            }
+                            return;
+                        }
 
                         AiMemoryDao memoryDao = AiMemoryDatabase.getInstance(getApplicationContext()).aiMemoryDao();
                         long now = System.currentTimeMillis();
@@ -1730,67 +2256,77 @@ public class NotificationService extends NotificationListenerService {
         final String incomingEventKey = buildIncomingEventKey(sbn, packageName, senderKey, incomingMessage);
         final String legacyIncomingEventKey = buildLegacyIncomingEventKey(sbn, packageName, senderKey, incomingMessage);
         final android.content.Context appContext = getApplicationContext();
+        final long eventTimestampMs = dispatchResult.getTimestampMs() > 0L
+                ? dispatchResult.getTimestampMs()
+                : System.currentTimeMillis();
+
+        ReplyExecutionResult computedOutcome = dispatchResult;
+        if (dispatchResult.isDispatched()) {
+            boolean consistentDispatchedPersistence = false;
+            try {
+                consistentDispatchedPersistence =
+                        getDbUtils().hasConsistentDispatchedPersistence(dispatchResult.getExecutionId());
+            } catch (Exception verifyEx) {
+                Log.w(TAG, "Failed verifying dispatched persistence consistency (" + verifyEx.getClass().getSimpleName() + ")");
+                consistentDispatchedPersistence = false;
+            }
+            if (!consistentDispatchedPersistence) {
+                computedOutcome = new ReplyExecutionResult(
+                        dispatchResult.getExecutionId(),
+                        ReplyExecutionStatus.UNKNOWN,
+                        true,
+                        false,
+                        ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR,
+                        "Skipped AI memory commit because MessageLogsDB outcome is not consistently DISPATCHED",
+                        eventTimestampMs
+                );
+            }
+        }
+        final ReplyExecutionResult authoritativeOutcome = computedOutcome;
+
+        final boolean stagedSynchronously;
+        if (authoritativeOutcome.isDispatched()
+                && authoritativeOutcome.getExecutionId() != null
+                && !authoritativeOutcome.getExecutionId().isEmpty()) {
+            stagedSynchronously = PendingPostDispatchMemoryStore.stage(
+                    appContext,
+                    new PendingPostDispatchMemoryStore.PendingPostDispatchEntry(
+                            authoritativeOutcome.getExecutionId(),
+                            authoritativeOutcome.getStatus().name(),
+                            authoritativeOutcome.getDispatchAttempted(),
+                            authoritativeOutcome.getDispatchedNormally(),
+                            authoritativeOutcome.getFailureCategory(),
+                            packageName,
+                            senderKey,
+                            senderDisplay,
+                            incomingMessage != null ? incomingMessage : "",
+                            incomingEventKey,
+                            legacyIncomingEventKey,
+                            finalReply,
+                            extractedNotes,
+                            effectiveMemoryEnabled,
+                            notesEnabled,
+                            recordReplyLog,
+                            maxTurnsToKeep,
+                            eventTimestampMs,
+                            0,
+                            System.currentTimeMillis()
+                    )
+            );
+            if (!stagedSynchronously) {
+                Log.e(
+                        TAG,
+                        "Failed synchronously staging post-dispatch AI memory recovery entry; attempting direct async persistence for attemptId="
+                                + authoritativeOutcome.getExecutionId()
+                );
+            }
+        } else {
+            stagedSynchronously = false;
+        }
 
         try {
             executePostDispatchPersistence(() -> {
                 try {
-                    long eventTimestampMs = dispatchResult.getTimestampMs() > 0L
-                            ? dispatchResult.getTimestampMs()
-                            : System.currentTimeMillis();
-
-                    ReplyExecutionResult authoritativeOutcome = dispatchResult;
-                    if (dispatchResult.isDispatched()) {
-                        boolean consistentDispatchedPersistence = false;
-                        try {
-                            consistentDispatchedPersistence =
-                                    getDbUtils().hasConsistentDispatchedPersistence(dispatchResult.getExecutionId());
-                        } catch (Exception verifyEx) {
-                            Log.w(TAG, "Failed verifying dispatched persistence consistency (" + verifyEx.getClass().getSimpleName() + ")");
-                            consistentDispatchedPersistence = false;
-                        }
-                        if (!consistentDispatchedPersistence) {
-                            authoritativeOutcome = new ReplyExecutionResult(
-                                    dispatchResult.getExecutionId(),
-                                    ReplyExecutionStatus.UNKNOWN,
-                                    true,
-                                    false,
-                                    ReplyExecutionManager.FAILURE_CLAIM_PERSISTENCE_ERROR,
-                                    "Skipped AI memory commit because MessageLogsDB outcome is not consistently DISPATCHED",
-                                    eventTimestampMs
-                            );
-                        }
-                    }
-
-                    if (authoritativeOutcome.isDispatched()
-                            && authoritativeOutcome.getExecutionId() != null
-                            && !authoritativeOutcome.getExecutionId().isEmpty()) {
-                        PendingPostDispatchMemoryStore.stage(
-                                appContext,
-                                new PendingPostDispatchMemoryStore.PendingPostDispatchEntry(
-                                        authoritativeOutcome.getExecutionId(),
-                                        authoritativeOutcome.getStatus().name(),
-                                        authoritativeOutcome.getDispatchAttempted(),
-                                        authoritativeOutcome.getDispatchedNormally(),
-                                        authoritativeOutcome.getFailureCategory(),
-                                        packageName,
-                                        senderKey,
-                                        senderDisplay,
-                                        incomingMessage != null ? incomingMessage : "",
-                                        incomingEventKey,
-                                        legacyIncomingEventKey,
-                                        finalReply,
-                                        extractedNotes,
-                                        effectiveMemoryEnabled,
-                                        notesEnabled,
-                                        recordReplyLog,
-                                        maxTurnsToKeep,
-                                        eventTimestampMs,
-                                        0,
-                                        System.currentTimeMillis()
-                                )
-                        );
-                    }
-
                     boolean persisted = getAiMemoryRepository().persistAuthoritativeAiReplyOutcome(
                             authoritativeOutcome,
                             packageName,
@@ -1807,7 +2343,7 @@ public class NotificationService extends NotificationListenerService {
                             legacyIncomingEventKey,
                             recordReplyLog
                     );
-                    if (authoritativeOutcome.isDispatched()) {
+                    if (authoritativeOutcome.isDispatched() && stagedSynchronously) {
                         PendingPostDispatchMemoryStore.remove(appContext, authoritativeOutcome.getExecutionId());
                     }
                     if (persisted && notesEnabled && !extractedNotes.isEmpty()) {
@@ -1815,15 +2351,33 @@ public class NotificationService extends NotificationListenerService {
                     }
                 } catch (Exception e) {
                     Log.e(TAG, "Failed persisting AI memory/notes (" + e.getClass().getSimpleName() + ")");
-                    if (dispatchResult.isDispatched()) {
-                        PendingPostDispatchMemoryStore.markRetryFailure(appContext, dispatchResult.getExecutionId());
+                    if (authoritativeOutcome.isDispatched() && stagedSynchronously) {
+                        PendingPostDispatchMemoryStore.markRetryFailure(appContext, authoritativeOutcome.getExecutionId());
+                    } else if (authoritativeOutcome.isDispatched()) {
+                        Log.e(
+                                TAG,
+                                "Both AI memory staging and Room persistence failed for dispatched attemptId="
+                                        + authoritativeOutcome.getExecutionId()
+                        );
                     }
                 } finally {
                     releasePermitSafely(permitReleaser);
                 }
             });
         } catch (Exception scheduleEx) {
-            Log.e(TAG, "Failed scheduling post-dispatch AI memory persistence (" + scheduleEx.getClass().getSimpleName() + ")");
+            if (authoritativeOutcome.isDispatched() && !stagedSynchronously) {
+                Log.e(
+                        TAG,
+                        "Failed scheduling post-dispatch AI memory persistence without durable stage ("
+                                + scheduleEx.getClass().getSimpleName() + ")"
+                );
+            } else {
+                Log.e(
+                        TAG,
+                        "Failed scheduling post-dispatch AI memory persistence ("
+                                + scheduleEx.getClass().getSimpleName() + "); staged entry preserved for recovery"
+                );
+            }
             releasePermitSafely(permitReleaser);
         }
         return dispatchResult;
@@ -1885,13 +2439,15 @@ public class NotificationService extends NotificationListenerService {
         }
         trackAsyncClaim(claimToken, claimEventKey);
         final AtomicBoolean callbackHandled = new AtomicBoolean(false);
-        service.getClaudeCompletion(url, headers, requestBody).enqueue(new Callback<JsonObject>() {
+        Call<JsonObject> claudeCall = service.getClaudeCompletion(url, headers, requestBody);
+        enqueueTrackedAiCall(claudeCall, claimEventKey, claimToken, permitReleaser, new Callback<JsonObject>() {
             @Override
             public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
                 boolean handedOffToSuccess = false;
                 try {
-                    if (serviceDestroyed.get()) {
-                        Log.d(TAG, "Ignoring late Claude response after NotificationService destruction.");
+                    if (serviceDestroyed.get() || call.isCanceled()) {
+                        Log.d(TAG, "Ignoring late/cancelled Claude response.");
+                        untrackAsyncClaim(claimToken);
                         cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                         return;
                     }
@@ -1927,7 +2483,7 @@ public class NotificationService extends NotificationListenerService {
                             Log.e(TAG, "Error parsing Claude response (" + e.getClass().getSimpleName() + ")");
                         }
                     }
-                    if (serviceDestroyed.get()) {
+                    if (serviceDestroyed.get() || call.isCanceled()) {
                         cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                         return;
                     }
@@ -1945,6 +2501,7 @@ public class NotificationService extends NotificationListenerService {
                             claimToken
                     );
                 } finally {
+                    activeAiCalls.remove(call);
                     if (!handedOffToSuccess) {
                         releasePermitSafely(permitReleaser);
                     }
@@ -1954,8 +2511,9 @@ public class NotificationService extends NotificationListenerService {
             @Override
             public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
                 try {
-                    if (serviceDestroyed.get()) {
-                        Log.d(TAG, "Ignoring late Claude failure after NotificationService destruction.");
+                    if (serviceDestroyed.get() || call.isCanceled()) {
+                        Log.d(TAG, "Ignoring late/cancelled Claude failure.");
+                        untrackAsyncClaim(claimToken);
                         cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                         return;
                     }
@@ -1977,6 +2535,7 @@ public class NotificationService extends NotificationListenerService {
                             claimToken
                     );
                 } finally {
+                    activeAiCalls.remove(call);
                     releasePermitSafely(permitReleaser);
                 }
             }
@@ -2054,13 +2613,15 @@ public class NotificationService extends NotificationListenerService {
         }
         trackAsyncClaim(claimToken, claimEventKey);
         final AtomicBoolean callbackHandled = new AtomicBoolean(false);
-        service.getGeminiCompletion(url, apiKey, requestBody).enqueue(new Callback<JsonObject>() {
+        Call<JsonObject> geminiCall = service.getGeminiCompletion(url, apiKey, requestBody);
+        enqueueTrackedAiCall(geminiCall, claimEventKey, claimToken, permitReleaser, new Callback<JsonObject>() {
             @Override
             public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
                 boolean handedOffToSuccess = false;
                 try {
-                    if (serviceDestroyed.get()) {
-                        Log.d(TAG, "Ignoring late Gemini response after NotificationService destruction.");
+                    if (serviceDestroyed.get() || call.isCanceled()) {
+                        Log.d(TAG, "Ignoring late/cancelled Gemini response.");
+                        untrackAsyncClaim(claimToken);
                         cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                         return;
                     }
@@ -2109,7 +2670,7 @@ public class NotificationService extends NotificationListenerService {
                             Log.e(TAG, "Error parsing Gemini response (" + e.getClass().getSimpleName() + ")");
                         }
                     }
-                    if (serviceDestroyed.get()) {
+                    if (serviceDestroyed.get() || call.isCanceled()) {
                         cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                         return;
                     }
@@ -2127,6 +2688,7 @@ public class NotificationService extends NotificationListenerService {
                             claimToken
                     );
                 } finally {
+                    activeAiCalls.remove(call);
                     if (!handedOffToSuccess) {
                         releasePermitSafely(permitReleaser);
                     }
@@ -2136,8 +2698,9 @@ public class NotificationService extends NotificationListenerService {
             @Override
             public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
                 try {
-                    if (serviceDestroyed.get()) {
-                        Log.d(TAG, "Ignoring late Gemini failure after NotificationService destruction.");
+                    if (serviceDestroyed.get() || call.isCanceled()) {
+                        Log.d(TAG, "Ignoring late/cancelled Gemini failure.");
+                        untrackAsyncClaim(claimToken);
                         cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                         return;
                     }
@@ -2159,6 +2722,7 @@ public class NotificationService extends NotificationListenerService {
                             claimToken
                     );
                 } finally {
+                    activeAiCalls.remove(call);
                     releasePermitSafely(permitReleaser);
                 }
             }
@@ -2232,13 +2796,15 @@ public class NotificationService extends NotificationListenerService {
         }
         trackAsyncClaim(claimToken, claimEventKey);
         final AtomicBoolean callbackHandled = new AtomicBoolean(false);
-        service.getChatCompletion(completionsUrl, bearerToken, request).enqueue(new Callback<OpenAIResponse>() {
+        Call<OpenAIResponse> openAiCall = service.getChatCompletion(completionsUrl, bearerToken, request);
+        enqueueTrackedAiCall(openAiCall, claimEventKey, claimToken, permitReleaser, new Callback<OpenAIResponse>() {
             @Override
             public void onResponse(@NonNull Call<OpenAIResponse> call, @NonNull Response<OpenAIResponse> response) {
                 boolean handedOffToSuccess = false;
                 try {
-                    if (serviceDestroyed.get()) {
-                        Log.d(TAG, "Ignoring late OpenAI/Compatible response after NotificationService destruction.");
+                    if (serviceDestroyed.get() || call.isCanceled()) {
+                        Log.d(TAG, "Ignoring late/cancelled OpenAI/Compatible response.");
+                        untrackAsyncClaim(claimToken);
                         cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                         return;
                     }
@@ -2269,7 +2835,7 @@ public class NotificationService extends NotificationListenerService {
                             Log.e(TAG, "Error parsing OpenAI/Compatible response (" + e.getClass().getSimpleName() + ")");
                         }
                     }
-                    if (serviceDestroyed.get()) {
+                    if (serviceDestroyed.get() || call.isCanceled()) {
                         cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                         return;
                     }
@@ -2287,6 +2853,7 @@ public class NotificationService extends NotificationListenerService {
                             claimToken
                     );
                 } finally {
+                    activeAiCalls.remove(call);
                     if (!handedOffToSuccess) {
                         releasePermitSafely(permitReleaser);
                     }
@@ -2296,8 +2863,9 @@ public class NotificationService extends NotificationListenerService {
             @Override
             public void onFailure(@NonNull Call<OpenAIResponse> call, @NonNull Throwable t) {
                 try {
-                    if (serviceDestroyed.get()) {
-                        Log.d(TAG, "Ignoring late OpenAI/Compatible failure after NotificationService destruction.");
+                    if (serviceDestroyed.get() || call.isCanceled()) {
+                        Log.d(TAG, "Ignoring late/cancelled OpenAI/Compatible failure.");
+                        untrackAsyncClaim(claimToken);
                         cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
                         return;
                     }
@@ -2319,15 +2887,54 @@ public class NotificationService extends NotificationListenerService {
                             claimToken
                     );
                 } finally {
+                    activeAiCalls.remove(call);
                     releasePermitSafely(permitReleaser);
                 }
             }
         });
     }
 
-    private boolean canPurgeMessages() {
-        long daysBeforePurgeInMS = 30 * 24 * 60 * 60 * 1000L;
-        return (System.currentTimeMillis() - PreferencesManager.getPreferencesInstance(this).getLastPurgedTime()) > daysBeforePurgeInMS;
+    private <T> void enqueueTrackedAiCall(
+            @NonNull Call<T> call,
+            @Nullable String claimEventKey,
+            @Nullable String claimToken,
+            @Nullable Runnable permitReleaser,
+            @NonNull Callback<T> callback
+    ) {
+        if (serviceDestroyed.get()) {
+            try {
+                call.cancel();
+            } catch (Exception ignored) {
+            }
+            untrackAsyncClaim(claimToken);
+            cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+            releasePermitSafely(permitReleaser);
+            return;
+        }
+        activeAiCalls.add(call);
+        if (serviceDestroyed.get()) {
+            activeAiCalls.remove(call);
+            try {
+                call.cancel();
+            } catch (Exception ignored) {
+            }
+            untrackAsyncClaim(claimToken);
+            cancelPendingClaimSafely(claimEventKey, claimToken, ReplyExecutionManager.FAILURE_SERVICE_SHUTDOWN);
+            releasePermitSafely(permitReleaser);
+            return;
+        }
+        call.enqueue(callback);
+        if (serviceDestroyed.get()) {
+            try {
+                call.cancel();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    @VisibleForTesting
+    int getActiveAiCallCountForTesting() {
+        return activeAiCalls.size();
     }
 
     @Override
@@ -2348,6 +2955,16 @@ public class NotificationService extends NotificationListenerService {
     @Override
     public void onDestroy() {
         serviceDestroyed.set(true);
+        List<Call<?>> activeCallsSnapshot = new ArrayList<>(activeAiCalls);
+        activeAiCalls.clear();
+        for (Call<?> activeCall : activeCallsSnapshot) {
+            try {
+                if (!activeCall.isCanceled()) {
+                    activeCall.cancel();
+                }
+            } catch (Exception ignored) {
+            }
+        }
         aiConversationCoordinator.cancelAll();
         List<Map.Entry<String, String>> pendingSnapshot = new ArrayList<>(pendingAsyncClaims.entrySet());
         pendingAsyncClaims.clear();
@@ -2358,7 +2975,11 @@ public class NotificationService extends NotificationListenerService {
         RuleNotificationProcessor processorToShutdown;
         ExecutorService executorToShutdown;
         ExecutorService postDispatchExecutorToShutdown;
+        CompletableFuture<Boolean> recoveryFutureToCancel;
         synchronized (lifecycleLock) {
+            recoveryFutureToCancel = startupRecoveryFuture;
+            startupRecoveryInFlight = false;
+            startupRecoveryCompletedOk = false;
             managerToShutdown = replyExecutionManager;
             replyExecutionManager = null;
             if (managerToShutdown != null) {
@@ -2374,9 +2995,14 @@ public class NotificationService extends NotificationListenerService {
                 lastPostDispatchPersistenceExecutor = postDispatchExecutorToShutdown;
             }
         }
+        if (recoveryFutureToCancel != null) {
+            recoveryFutureToCancel.complete(false);
+        }
         if (processorToShutdown != null) {
             processorToShutdown.shutdown();
         }
+        pendingRuleReservationsByClaimToken.clear();
+        ruleReservationCoordinator.releaseAllReserved();
         if (executorToShutdown != null) {
             executorToShutdown.shutdownNow();
         }

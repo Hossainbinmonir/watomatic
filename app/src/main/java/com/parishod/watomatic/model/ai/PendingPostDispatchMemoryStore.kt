@@ -28,6 +28,18 @@ object PendingPostDispatchMemoryStore {
     @Volatile
     private var lastContext: Context? = null
 
+    @Volatile
+    private var forceStageFailureForTesting: Boolean = false
+
+    data class ReplayReport(
+        val totalPending: Int,
+        val replayedCount: Int,
+        val failedCount: Int
+    ) {
+        val allSucceeded: Boolean
+            get() = failedCount == 0
+    }
+
     data class PendingPostDispatchEntry(
         val attemptId: String,
         val statusName: String,
@@ -52,18 +64,32 @@ object PendingPostDispatchMemoryStore {
     )
 
     @JvmStatic
-    fun stage(context: Context, entry: PendingPostDispatchEntry) {
-        if (entry.attemptId.isBlank()) return
+    fun stage(context: Context, entry: PendingPostDispatchEntry): Boolean {
+        if (entry.attemptId.isBlank()) return false
         val appCtx = context.applicationContext
         lastContext = appCtx
         synchronized(lock) {
-            try {
+            return try {
+                if (forceStageFailureForTesting) {
+                    throw IllegalStateException("Forced stage failure for testing")
+                }
                 val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                prefs.edit()
+                val committed = prefs.edit()
                     .putString(KEY_PREFIX + entry.attemptId, gson.toJson(entry))
                     .commit()
+                if (!committed) {
+                    Log.e(
+                        TAG,
+                        "Unable to commit pending AI memory write for attemptId=${entry.attemptId}"
+                    )
+                }
+                committed
             } catch (e: Exception) {
-                Log.w(TAG, "Unable to stage pending AI memory write (${e.javaClass.simpleName})")
+                Log.e(
+                    TAG,
+                    "Unable to stage pending AI memory write for attemptId=${entry.attemptId} (${e.javaClass.simpleName})"
+                )
+                false
             }
         }
     }
@@ -161,13 +187,28 @@ object PendingPostDispatchMemoryStore {
         repository: AiMemoryRepository? = null,
         dbUtils: DbUtils? = null
     ): Int {
+        return replayPendingEntriesWithReport(context, repository, dbUtils).replayedCount
+    }
+
+    /**
+     * Replays staged post-dispatch AI memory entries and returns a structured [ReplayReport]
+     * indicating both succeeded and failed entry counts.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun replayPendingEntriesWithReport(
+        context: Context,
+        repository: AiMemoryRepository? = null,
+        dbUtils: DbUtils? = null
+    ): ReplayReport {
         val appCtx = context.applicationContext
         val pending = getPendingEntries(appCtx)
-        if (pending.isEmpty()) return 0
+        if (pending.isEmpty()) return ReplayReport(totalPending = 0, replayedCount = 0, failedCount = 0)
 
         val repo = repository ?: AiMemoryRepository(AiMemoryDatabase.getInstance(appCtx).aiMemoryDao())
         val db = dbUtils ?: DbUtils(appCtx)
         var replayedCount = 0
+        var failedCount = 0
 
         for (entry in pending) {
             try {
@@ -210,15 +251,26 @@ object PendingPostDispatchMemoryStore {
                 remove(appCtx, entry.attemptId)
                 replayedCount++
             } catch (e: Exception) {
+                failedCount++
                 Log.w(TAG, "Replay of staged AI memory write failed (${e.javaClass.simpleName})")
                 markRetryFailure(appCtx, entry.attemptId)
             }
         }
-        return replayedCount
+        return ReplayReport(
+            totalPending = pending.size,
+            replayedCount = replayedCount,
+            failedCount = failedCount
+        )
+    }
+
+    @JvmStatic
+    fun setForceStageFailureForTesting(force: Boolean) {
+        forceStageFailureForTesting = force
     }
 
     @JvmStatic
     fun clearForTesting(context: Context? = lastContext) {
+        forceStageFailureForTesting = false
         val appCtx = context?.applicationContext ?: return
         synchronized(lock) {
             runCatching {

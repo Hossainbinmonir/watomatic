@@ -56,18 +56,19 @@ open class AiMemoryRepository(private val dao: AiMemoryDao) {
         val appCtx = context.applicationContext
         val cutoffMs = nowMs - DbUtils.HISTORY_RETENTION_MS
         val protectedIds = LinkedHashSet<String>()
-        try {
-            val protectedAttemptIds = MessageLogsDB.getInstance(appCtx)
-                .replyAttemptDao()
-                .getProtectedAttemptIdsSync()
-            for (attemptId in protectedAttemptIds) {
-                if (attemptId.isNotBlank()) {
-                    protectedIds.add(attemptId)
-                }
+        val protectedAttemptIds = MessageLogsDB.getInstance(appCtx)
+            .replyAttemptDao()
+            .getProtectedAttemptIdsSync()
+        for (attemptId in protectedAttemptIds) {
+            if (attemptId.isNotBlank()) {
+                protectedIds.add(attemptId)
             }
-        } catch (_: Exception) {
         }
-        protectedIds.addAll(PendingPostDispatchMemoryStore.getPendingAttemptIds(appCtx))
+        for (pendingAttemptId in PendingPostDispatchMemoryStore.getPendingAttemptIds(appCtx)) {
+            if (pendingAttemptId.isNotBlank()) {
+                protectedIds.add(pendingAttemptId)
+            }
+        }
         return dao.purgeExpiredMemorySync(cutoffMs, protectedIds.toList())
     }
 

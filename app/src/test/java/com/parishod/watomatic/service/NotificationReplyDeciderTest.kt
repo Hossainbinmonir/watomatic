@@ -331,4 +331,47 @@ class NotificationReplyDeciderTest {
         whenever(prefs.isServiceEnabled()).thenReturn(false)
         assertFalse(decider.isServiceEnabled())
     }
+
+    // ========== F-025-10 image-group heuristic tests ==========
+
+    @Test
+    fun `isGroupMessageAndReplyAllowed blocks Sender colon Group with camera emoji when isGroup is false`() {
+        val sbn = buildMockSbn(
+            isGroup = false,
+            title = "Alice: Family Chat",
+            text = "\uD83D\uDCF7 Photo"
+        )
+        assertFalse(decider.isGroupMessageAndReplyAllowed(sbn))
+    }
+
+    @Test
+    fun `isGroupMessageAndReplyAllowed blocks Sender at-space Group with camera emoji when isGroup is false`() {
+        val sbn = buildMockSbn(
+            isGroup = false,
+            title = "Bob @ Engineering",
+            text = "\uD83D\uDCF7"
+        )
+        assertFalse(decider.isGroupMessageAndReplyAllowed(sbn))
+    }
+
+    @Test
+    fun `isGroupMessageAndReplyAllowed allows direct sender and email handle with camera emoji`() {
+        val directSbn = buildMockSbn(isGroup = false, title = "Alice", text = "\uD83D\uDCF7 Photo")
+        assertTrue(decider.isGroupMessageAndReplyAllowed(directSbn))
+
+        val emailSbn = buildMockSbn(isGroup = false, title = "alice@example.com", text = "\uD83D\uDCF7 Photo")
+        assertTrue(decider.isGroupMessageAndReplyAllowed(emailSbn))
+    }
+
+    @Test
+    fun `isGroupMessageAndReplyAllowed handles blank lone delimiter and missing right side safely`() {
+        assertTrue(decider.isGroupMessageAndReplyAllowed(buildMockSbn(isGroup = false, title = null, text = "\uD83D\uDCF7")))
+        assertTrue(decider.isGroupMessageAndReplyAllowed(buildMockSbn(isGroup = false, title = "", text = "\uD83D\uDCF7")))
+        assertTrue(decider.isGroupMessageAndReplyAllowed(buildMockSbn(isGroup = false, title = "   ", text = "\uD83D\uDCF7")))
+        assertTrue(decider.isGroupMessageAndReplyAllowed(buildMockSbn(isGroup = false, title = ": ", text = "\uD83D\uDCF7")))
+        assertTrue(decider.isGroupMessageAndReplyAllowed(buildMockSbn(isGroup = false, title = "@ ", text = "\uD83D\uDCF7")))
+        assertTrue(decider.isGroupMessageAndReplyAllowed(buildMockSbn(isGroup = false, title = "Alice: ", text = "\uD83D\uDCF7")))
+        assertTrue(decider.isGroupMessageAndReplyAllowed(buildMockSbn(isGroup = false, title = ": Group", text = "\uD83D\uDCF7")))
+        assertTrue(decider.isGroupMessageAndReplyAllowed(buildMockSbn(isGroup = false, title = "Alice: Group", text = "Plain text")))
+    }
 }

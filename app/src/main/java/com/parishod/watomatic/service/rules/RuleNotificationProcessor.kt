@@ -3,7 +3,6 @@ package com.parishod.watomatic.service.rules
 import android.app.Notification
 import android.content.Context
 import android.service.notification.StatusBarNotification
-import android.text.SpannableString
 import android.util.Log
 import com.parishod.watomatic.NotificationWear
 import com.parishod.watomatic.model.preferences.PreferencesManager
@@ -13,6 +12,7 @@ import com.parishod.watomatic.model.utils.DbUtils
 import com.parishod.watomatic.model.utils.NotificationUtils
 import com.parishod.watomatic.service.reply.NotificationEventKeyBuilder
 import com.parishod.watomatic.service.reply.PendingClaimHandoff
+import com.parishod.watomatic.service.reply.PreDispatchRetryCoordinator
 import com.parishod.watomatic.service.reply.ReplyExecutionManager
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -24,7 +24,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 class RuleNotificationProcessor @JvmOverloads constructor(
     private val context: Context,
     private val executor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor(),
-    private val dbUtils: DbUtils = DbUtils(context.applicationContext)
+    private val dbUtils: DbUtils = DbUtils(context.applicationContext),
+    val reservationCoordinator: RuleExecutionReservationCoordinator = RuleExecutionReservationCoordinator(),
+    private val retryCoordinator: PreDispatchRetryCoordinator = PreDispatchRetryCoordinator(context.applicationContext)
 ) {
     interface ReplyDispatchCallback {
         fun onRuleMatchedSendReply(
@@ -36,9 +38,57 @@ class RuleNotificationProcessor @JvmOverloads constructor(
         fun onFallbackToLegacy(sbn: StatusBarNotification)
     }
 
+    /**
+     * Preferred callback receiving explicit `claimToken`, `eventKey`, and [RuleExecutionReservationCoordinator.RuleReservation]
+     * directly without relying on global registry lookups.
+     */
+    abstract class ClaimAwareReplyDispatchCallback : ReplyDispatchCallback {
+        abstract fun onRuleMatchedSendReply(
+            sbn: StatusBarNotification,
+            notificationWear: NotificationWear,
+            replyText: String,
+            matchedRule: AutoReplyRule,
+            claimToken: String?,
+            eventKey: String?,
+            reservation: RuleExecutionReservationCoordinator.RuleReservation?
+        )
+
+        abstract fun onFallbackToLegacy(
+            sbn: StatusBarNotification,
+            claimToken: String?,
+            eventKey: String?
+        )
+
+        final override fun onRuleMatchedSendReply(
+            sbn: StatusBarNotification,
+            notificationWear: NotificationWear,
+            replyText: String,
+            matchedRule: AutoReplyRule
+        ) {
+            onRuleMatchedSendReply(sbn, notificationWear, replyText, matchedRule, null, null, null)
+        }
+
+        final override fun onFallbackToLegacy(sbn: StatusBarNotification) {
+            onFallbackToLegacy(sbn, null, null)
+        }
+    }
+
+    private data class ActivePendingClaim(
+        val eventKey: String,
+        @Volatile var reservation: RuleExecutionReservationCoordinator.RuleReservation? = null
+    )
+
     private val appContext = context.applicationContext
     private val shutDown = AtomicBoolean(false)
-    private val activePendingClaims = ConcurrentHashMap<String, String>()
+    private val activePendingClaims = ConcurrentHashMap<String, ActivePendingClaim>()
+    private val inFlightEventKeys = ConcurrentHashMap<String, Boolean>()
+
+    internal fun activeInFlightEventKeyCountForTesting(): Int = inFlightEventKeys.size
+
+    @androidx.annotation.VisibleForTesting
+    fun awaitIdleForTesting() {
+        executor.submit { }.get(5, TimeUnit.SECONDS)
+    }
 
     fun processNotification(
         sbn: StatusBarNotification?,
@@ -83,80 +133,53 @@ class RuleNotificationProcessor @JvmOverloads constructor(
             return
         }
 
-        // Preserve existing image-group heuristic safety check
+        // Fixed image-group heuristic safety check for notifications missing android.isGroupConversation
         val rawTitle = NotificationUtils.getTitleRaw(sbn)
-        val rawText = SpannableString.valueOf("" + rawTextObj)
-        val isPossiblyAnImageGrpMsg = ((rawTitle != null) && (": ".contains(rawTitle) || "@ ".contains(rawTitle))) &&
-            rawText.toString().contains("\uD83D\uDCF7")
-        if (!isGroup && isPossiblyAnImageGrpMsg) {
+        if (!isGroup && NotificationUtils.isPossiblyImageGroupMessage(rawTitle, rawTextObj)) {
             return
         }
 
         val eventKey = NotificationEventKeyBuilder.buildEventKey(sbn, messageText) ?: return
-        val senderKey = NotificationEventKeyBuilder.normalizeSenderKey(title)
-        val claimToken = UUID.randomUUID().toString()
-        val claimOutcome = try {
-            dbUtils.tryAcquireNotificationClaim(
-                eventKey,
-                claimToken,
-                packageName,
-                senderKey,
-                sbn.key,
-                System.currentTimeMillis(),
-                false
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed acquiring persistent claim (${e.javaClass.simpleName})")
+        val senderKey = NotificationEventKeyBuilder.normalizeSenderKey(title, isGroup)
+
+        if (inFlightEventKeys.putIfAbsent(eventKey, java.lang.Boolean.TRUE) != null) {
+            Log.d(TAG, "Concurrent in-flight notification suppressed before evaluation")
             return
         }
-
-        if (!claimOutcome.acquired) {
-            Log.d(TAG, "Duplicate or locked notification suppressed: decision=${claimOutcome.decision}")
-            return
-        }
-
         if (shutDown.get()) {
-            cancelClaimSafely(eventKey, claimToken)
+            inFlightEventKeys.remove(eventKey)
             return
         }
-
-        activePendingClaims[claimToken] = eventKey
-        PendingClaimHandoff.register(eventKey, claimToken)
 
         try {
             executor.execute {
-                if (shutDown.get()) {
-                    activePendingClaims.remove(claimToken)
-                    PendingClaimHandoff.consume(eventKey)
-                    cancelClaimSafely(eventKey, claimToken)
-                    return@execute
-                }
+                var acquiredClaimToken: String? = null
+                var scheduledDelayed = false
+                var reservation: RuleExecutionReservationCoordinator.RuleReservation? = null
                 try {
+                    if (shutDown.get()) {
+                        return@execute
+                    }
+
                     val db = AutoReplyRulesDatabase.getInstance(appContext)
                     val ruleDao = db.ruleDao()
                     val logDao = db.executionLogDao()
 
                     val totalRules = ruleDao.getTotalRuleCountSync()
                     if (totalRules == 0) {
-                        activePendingClaims.remove(claimToken)
-                        callback.onFallbackToLegacy(sbn)
+                        dispatchLegacyFallback(callback, sbn, null, eventKey)
                         return@execute
                     }
 
                     val enabledRules = ruleDao.getEnabledRulesSync()
                     if (enabledRules.isEmpty()) {
-                        activePendingClaims.remove(claimToken)
                         if (prefs.isRuleFallbackToGlobalEnabled()) {
-                            callback.onFallbackToLegacy(sbn)
-                        } else {
-                            PendingClaimHandoff.consume(eventKey)
-                            releaseClaimSafely(eventKey, claimToken)
+                            dispatchLegacyFallback(callback, sbn, null, eventKey)
                         }
                         return@execute
                     }
 
                     val logStore = RoomRuleExecutionLogStore(logDao)
-                    val evaluator = RuleEvaluator(logStore)
                     val msgContext = IncomingMessageContext(
                         packageName = packageName,
                         senderName = title,
@@ -167,54 +190,146 @@ class RuleNotificationProcessor @JvmOverloads constructor(
                         selfDisplayName = selfDisplayName
                     )
 
-                    val result = evaluator.evaluate(enabledRules, msgContext, System.currentTimeMillis())
-                    if (result == null) {
-                        activePendingClaims.remove(claimToken)
+                    val reservedMatch = reservationCoordinator.evaluateAndReserve(
+                        rules = enabledRules,
+                        context = msgContext,
+                        logStore = logStore,
+                        nowMillis = System.currentTimeMillis()
+                    )
+                    if (reservedMatch == null) {
                         if (prefs.isRuleFallbackToGlobalEnabled()) {
-                            callback.onFallbackToLegacy(sbn)
-                        } else {
-                            PendingClaimHandoff.consume(eventKey)
-                            releaseClaimSafely(eventKey, claimToken)
+                            dispatchLegacyFallback(callback, sbn, null, eventKey)
                         }
                         return@execute
                     }
 
+                    reservation = reservedMatch.reservation
+                    val result = reservedMatch.evaluation
                     val finalReplyText = result.replyText
                     val delaySeconds = result.rule.replyDelaySeconds.coerceIn(0, MAX_DELAY_SECONDS)
 
+                    val claimToken = UUID.randomUUID().toString()
+                    val claimOutcome = try {
+                        retryCoordinator.tryAcquireForFreshNotification(
+                            dbUtils = dbUtils,
+                            sbn = sbn,
+                            notificationWear = notificationWear,
+                            eventKey = eventKey,
+                            claimToken = claimToken,
+                            packageName = packageName,
+                            senderKey = senderKey,
+                            notificationKey = sbn.key,
+                            nowMs = System.currentTimeMillis(),
+                            isServiceDestroyed = shutDown.get()
+                        )
+                    } catch (e: Exception) {
+                        reservationCoordinator.release(reservation.reservationId)
+                        reservation = null
+                        Log.e(TAG, "Failed acquiring persistent claim (${e.javaClass.simpleName})")
+                        return@execute
+                    }
+
+                    if (!claimOutcome.acquired) {
+                        reservationCoordinator.release(reservation.reservationId)
+                        reservation = null
+                        Log.d(TAG, "Duplicate or locked notification suppressed: decision=${claimOutcome.decision}")
+                        return@execute
+                    }
+
+                    acquiredClaimToken = claimToken
+                    if (shutDown.get()) {
+                        reservationCoordinator.release(reservation.reservationId)
+                        reservation = null
+                        cancelClaimSafely(eventKey, claimToken)
+                        return@execute
+                    }
+
+                    val pendingEntry = ActivePendingClaim(eventKey = eventKey, reservation = reservation)
+                    activePendingClaims[claimToken] = pendingEntry
+                    if (callback !is ClaimAwareReplyDispatchCallback) {
+                        PendingClaimHandoff.register(eventKey, claimToken)
+                    }
+
+                    val capturedReservation = reservation
                     val dispatchAction = Runnable {
                         activePendingClaims.remove(claimToken)
                         if (shutDown.get()) {
-                            PendingClaimHandoff.consume(eventKey)
+                            PendingClaimHandoff.cancel(eventKey, claimToken)
+                            reservationCoordinator.release(capturedReservation.reservationId)
                             cancelClaimSafely(eventKey, claimToken)
                             return@Runnable
                         }
                         try {
-                            callback.onRuleMatchedSendReply(sbn, notificationWear, finalReplyText, result.rule)
+                            if (callback is ClaimAwareReplyDispatchCallback) {
+                                PendingClaimHandoff.complete(eventKey, claimToken)
+                                callback.onRuleMatchedSendReply(
+                                    sbn,
+                                    notificationWear,
+                                    finalReplyText,
+                                    result.rule,
+                                    claimToken,
+                                    eventKey,
+                                    capturedReservation
+                                )
+                            } else {
+                                callback.onRuleMatchedSendReply(sbn, notificationWear, finalReplyText, result.rule)
+                            }
                         } catch (e: Exception) {
-                            PendingClaimHandoff.consume(eventKey)
+                            PendingClaimHandoff.cancel(eventKey, claimToken)
+                            reservationCoordinator.release(capturedReservation.reservationId)
                             cancelClaimSafely(eventKey, claimToken)
                             Log.e(TAG, "Error dispatching rule reply (${e.javaClass.simpleName})")
                         }
                     }
 
                     if (delaySeconds > 0) {
-                        executor.schedule(dispatchAction, delaySeconds.toLong(), TimeUnit.SECONDS)
+                        scheduledDelayed = true
+                        try {
+                            executor.schedule(dispatchAction, delaySeconds.toLong(), TimeUnit.SECONDS)
+                        } catch (scheduleEx: Exception) {
+                            scheduledDelayed = false
+                            activePendingClaims.remove(claimToken)
+                            PendingClaimHandoff.cancel(eventKey, claimToken)
+                            reservationCoordinator.release(capturedReservation.reservationId)
+                            reservation = null
+                            cancelClaimSafely(eventKey, claimToken)
+                            Log.e(TAG, "Failed scheduling delayed rule dispatch (${scheduleEx.javaClass.simpleName})")
+                        }
                     } else {
                         dispatchAction.run()
                     }
                 } catch (e: Exception) {
-                    activePendingClaims.remove(claimToken)
-                    PendingClaimHandoff.consume(eventKey)
-                    releaseClaimSafely(eventKey, claimToken)
+                    val token = acquiredClaimToken
+                    if (!scheduledDelayed && token != null) {
+                        activePendingClaims.remove(token)
+                        PendingClaimHandoff.cancel(eventKey, token)
+                        releaseClaimSafely(eventKey, token)
+                    }
+                    reservationCoordinator.release(reservation?.reservationId)
                     Log.e(TAG, "Error evaluating auto-reply rules (${e.javaClass.simpleName})")
+                } finally {
+                    inFlightEventKeys.remove(eventKey)
                 }
             }
         } catch (e: Exception) {
-            activePendingClaims.remove(claimToken)
-            PendingClaimHandoff.consume(eventKey)
-            cancelClaimSafely(eventKey, claimToken)
+            inFlightEventKeys.remove(eventKey)
             Log.e(TAG, "Failed scheduling rule evaluation (${e.javaClass.simpleName})")
+        }
+    }
+
+    private fun dispatchLegacyFallback(
+        callback: ReplyDispatchCallback,
+        sbn: StatusBarNotification,
+        claimToken: String?,
+        eventKey: String
+    ) {
+        if (callback is ClaimAwareReplyDispatchCallback) {
+            if (claimToken != null) {
+                PendingClaimHandoff.complete(eventKey, claimToken)
+            }
+            callback.onFallbackToLegacy(sbn, claimToken, eventKey)
+        } else {
+            callback.onFallbackToLegacy(sbn)
         }
     }
 
@@ -241,13 +356,16 @@ class RuleNotificationProcessor @JvmOverloads constructor(
 
     fun shutdown() {
         shutDown.set(true)
+        inFlightEventKeys.clear()
         executor.shutdownNow()
         val snapshot = activePendingClaims.entries.toList()
         activePendingClaims.clear()
-        for ((token, eventKey) in snapshot) {
-            PendingClaimHandoff.consume(eventKey)
-            cancelClaimSafely(eventKey, token)
+        for ((token, entry) in snapshot) {
+            PendingClaimHandoff.cancel(entry.eventKey, token)
+            reservationCoordinator.release(entry.reservation?.reservationId)
+            cancelClaimSafely(entry.eventKey, token)
         }
+        reservationCoordinator.releaseAllReserved()
     }
 
     companion object {

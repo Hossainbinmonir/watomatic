@@ -12,6 +12,8 @@ import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.RemoteInput;
 
@@ -144,8 +146,46 @@ public class NotificationUtils {
         );
     }
 
-    public static String getTitleRaw(StatusBarNotification sbn) {
+    @Nullable
+    public static String getTitleRaw(@Nullable StatusBarNotification sbn) {
+        if (sbn == null || sbn.getNotification() == null || sbn.getNotification().extras == null) {
+            return null;
+        }
         return sbn.getNotification().extras.getString("android.title");
+    }
+
+    /**
+     * Legacy fallback heuristic for group photo notifications where {@code android.isGroupConversation}
+     * is absent or false, e.g. titles formatted as {@code "Sender: Group"} or {@code "Sender @ Group"}
+     * paired with a camera emoji photo indicator.
+     */
+    public static boolean isPossiblyImageGroupMessage(@Nullable String rawTitle, @Nullable Object rawTextObj) {
+        if (rawTitle == null || rawTextObj == null) {
+            return false;
+        }
+        String trimmedTitle = rawTitle.trim();
+        if (trimmedTitle.isEmpty()) {
+            return false;
+        }
+        String rawText = rawTextObj.toString();
+        if (!rawText.contains("\uD83D\uDCF7")) {
+            return false;
+        }
+        return hasNonEmptyDelimitedParts(trimmedTitle, ": ")
+                || hasNonEmptyDelimitedParts(trimmedTitle, "@ ");
+    }
+
+    private static boolean hasNonEmptyDelimitedParts(@NonNull String text, @NonNull String delimiter) {
+        int idx = text.indexOf(delimiter);
+        while (idx >= 0) {
+            String left = text.substring(0, idx).trim();
+            String right = text.substring(idx + delimiter.length()).trim();
+            if (!left.isEmpty() && !right.isEmpty()) {
+                return true;
+            }
+            idx = text.indexOf(delimiter, idx + delimiter.length());
+        }
+        return false;
     }
 
     private static final String CHANNEL_ID = "nls_health_channel";

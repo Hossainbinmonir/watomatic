@@ -31,6 +31,7 @@ public class PreferencesManager {
     private final String KEY_IS_APPEND_WATOMATIC_ATTRIBUTION = "pref_is_append_watomatic_attribution";
     private final String KEY_GITHUB_RELEASE_NOTES_ID = "pref_github_release_notes_id";
     private final String KEY_PURGE_MESSAGE_LOGS_LAST_TIME = "pref_purge_message_logs_last_time";
+    private final String KEY_PURGE_CLAIMS_LAST_TIME = "pref_purge_claims_last_time";
     private final String KEY_PLAY_STORE_RATING_STATUS = "pref_play_store_rating_status";
     private final String KEY_PLAY_STORE_RATING_LAST_TIME = "pref_play_store_rating_last_time";
     private final String KEY_SHOW_FOREGROUND_SERVICE_NOTIFICATION = "pref_show_foreground_service_notification";
@@ -377,6 +378,16 @@ public class PreferencesManager {
     public void setPurgeMessageTime(long purgeMessageTime) {
         SharedPreferences.Editor editor = _sharedPrefs.edit();
         editor.putLong(KEY_PURGE_MESSAGE_LOGS_LAST_TIME, purgeMessageTime);
+        editor.apply();
+    }
+
+    public long getLastClaimsPurgedTime() {
+        return _sharedPrefs.getLong(KEY_PURGE_CLAIMS_LAST_TIME, 0);
+    }
+
+    public void setLastClaimsPurgedTime(long purgeClaimsTime) {
+        SharedPreferences.Editor editor = _sharedPrefs.edit();
+        editor.putLong(KEY_PURGE_CLAIMS_LAST_TIME, purgeClaimsTime);
         editor.apply();
     }
 

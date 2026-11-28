@@ -63,8 +63,8 @@ class RuleEvaluator(
                     caseSensitive = rule.isCaseSensitive
                 )
             ) continue
-            if (!passesCooldown(rule, context.packageName, sender, nowMillis)) continue
-            if (!passesFrequencyLimit(rule, context.packageName, sender, nowMillis)) continue
+            if (!passesCooldown(rule, context.packageName, sender, context.isGroup, nowMillis)) continue
+            if (!passesFrequencyLimit(rule, context.packageName, sender, context.isGroup, nowMillis)) continue
             if (!rule.useAiReply && rule.replyMessage.isBlank()) continue
 
             return RuleEvaluationResult(rule = rule, replyText = rule.replyMessage)
@@ -110,9 +110,17 @@ class RuleEvaluator(
         packageName: String,
         senderName: String,
         nowMillis: Long
+    ): Boolean = passesCooldown(rule, packageName, senderName, false, nowMillis)
+
+    internal fun passesCooldown(
+        rule: AutoReplyRule,
+        packageName: String,
+        senderName: String,
+        isGroup: Boolean,
+        nowMillis: Long
     ): Boolean {
         if (rule.cooldownSeconds <= 0) return true
-        val senderKey = senderName.ifEmpty { UNKNOWN_SENDER }
+        val senderKey = buildSenderScopeKey(senderName, isGroup)
         val lastReplied = executionLogStore.getLastReplyTimeForRuleAndSender(
             ruleId = rule.id,
             packageName = packageName,
@@ -126,9 +134,17 @@ class RuleEvaluator(
         packageName: String,
         senderName: String,
         nowMillis: Long
+    ): Boolean = passesFrequencyLimit(rule, packageName, senderName, false, nowMillis)
+
+    internal fun passesFrequencyLimit(
+        rule: AutoReplyRule,
+        packageName: String,
+        senderName: String,
+        isGroup: Boolean,
+        nowMillis: Long
     ): Boolean {
         if (rule.maxRepliesPerSender <= 0) return true
-        val senderKey = senderName.ifEmpty { UNKNOWN_SENDER }
+        val senderKey = buildSenderScopeKey(senderName, isGroup)
         val sinceTime = if (rule.frequencyWindowMinutes > 0) {
             nowMillis - rule.frequencyWindowMinutes * 60_000L
         } else {
@@ -145,5 +161,12 @@ class RuleEvaluator(
 
     companion object {
         const val UNKNOWN_SENDER = "__unknown_sender__"
+
+        @JvmStatic
+        fun buildSenderScopeKey(senderName: String?, isGroup: Boolean): String {
+            val trimmed = senderName?.trim().orEmpty()
+            val base = if (trimmed.isEmpty()) UNKNOWN_SENDER else trimmed
+            return if (isGroup) "group:$base" else base
+        }
     }
 }
